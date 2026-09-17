@@ -48,8 +48,34 @@ where NaN is supposed to mean "there was nothing to compute this from", a NaN
 manufactured by floating point is worse than a wrong number: it is a wrong
 number wearing the uniform of a correct answer.
 
-Negative variance is clamped to zero and counted. The evaluator logs the count
-if it is ever non-zero, because in float64 it should not be.
+Negative variance is clamped to zero. Only a negative that is large relative
+to the mean square is counted: a series whose true variance is zero, which any
+upstream constant produces, lands a few units in the last place below zero
+through ordinary accumulator drift, and clamping that is correct rather than
+noteworthy. The evaluator logs the counted kind, which in float64 should never
+appear.
+
+The first reportable row
+------------------------
+Every kernel takes ``first_row`` and emits nothing before it. That is the
+node's warmup, which is its own window length plus whatever its children
+already cost, and it is not the same as the row where this window first
+closes.
+
+The two rules interact, and the interaction is not obvious.
+``min_periods`` says a window holding 80 per cent of its observations is
+usable. A child with its own warmup is NaN over its first rows. Put them
+together and a kernel reading that child can clear the 80 per cent floor
+several rows before the composed warmup: ``ts_mean(ts_mean(close, 20), 60)``
+has warmup 78, but the outer window holds 48 present values by row 66 and
+would happily emit there. Those rows are not a forward read, but they are
+values in rows the node itself declares invalid, and anything downstream
+would treat them as data.
+
+So warmup is the authority on what may be emitted and min_periods is the
+authority on what may be computed from what is emitted. Passing the row in
+rather than masking afterwards also keeps the degradation counters honest,
+since cells that were never reportable are never counted.
 
 Determinism
 -----------
@@ -75,6 +101,17 @@ from typing import Final
 import numpy as np
 from numba import njit
 
+VARIANCE_TOLERANCE: Final[float] = 1e-10
+"""Relative size below which a negative variance is drift, not a fault.
+
+A rolling accumulator adds and subtracts the same magnitudes thousands of
+times, so a series whose true variance is zero, which happens whenever an
+upstream operator emits a constant, lands a few units in the last place below
+zero. Clamping that to zero is correct and unremarkable. Only a negative
+large relative to the mean square says the accumulators have actually drifted,
+and only that is worth counting and surfacing.
+"""
+
 KERNEL_FLAGS: Final[dict[str, object]] = {
     "cache": True,
     "fastmath": False,
@@ -89,7 +126,7 @@ KERNEL_FLAGS: Final[dict[str, object]] = {
 
 
 @njit(**KERNEL_FLAGS)
-def ts_mean(x, d, min_periods):
+def ts_mean(x, d, min_periods, first_row):
     """Rolling mean over present observations.
 
     Returns ``(out, degraded, considered, clamped)``. The input plane is its
@@ -115,7 +152,7 @@ def ts_mean(x, d, min_periods):
                     total[j] -= np.float64(w)
                     count[j] -= 1
             m = count[j]
-            if t >= d - 1 and m >= min_periods:
+            if t >= first_row and m >= min_periods:
                 out[t, j] = np.float32(total[j] / m)
                 considered += 1
                 if m < d:
@@ -124,7 +161,7 @@ def ts_mean(x, d, min_periods):
 
 
 @njit(**KERNEL_FLAGS)
-def ts_std(x, d, min_periods):
+def ts_std(x, d, min_periods, first_row):
     """Rolling sample standard deviation, ddof=1, over present observations.
 
     Variance is clamped at zero and the clamp is counted. In float64 it should
@@ -160,12 +197,13 @@ def ts_std(x, d, min_periods):
                     total_sq[j] -= wd * wd
                     count[j] -= 1
             m = count[j]
-            if t >= d - 1 and m >= min_periods and m >= 2:
+            if t >= first_row and m >= min_periods and m >= 2:
                 mean = total[j] / m
                 variance = (total_sq[j] - mean * total[j]) / (m - 1)
                 if variance < 0.0:
+                    if variance < -VARIANCE_TOLERANCE * (total_sq[j] / m + 1.0):
+                        clamped += 1
                     variance = 0.0
-                    clamped += 1
                 out[t, j] = np.float32(np.sqrt(variance))
                 considered += 1
                 if m < d:
@@ -174,7 +212,7 @@ def ts_std(x, d, min_periods):
 
 
 @njit(**KERNEL_FLAGS)
-def decay_linear(x, d, min_periods):
+def decay_linear(x, d, min_periods, first_row):
     """Linearly weighted mean, weights d, d-1, ..., 1, renormalised.
 
     The weights are rescaled over the observations actually present, never
@@ -218,7 +256,7 @@ def decay_linear(x, d, min_periods):
                     count[j] -= 1
 
             m = count[j]
-            if t >= d - 1 and m >= min_periods and weight_total[j] > 0.0:
+            if t >= first_row and m >= min_periods and weight_total[j] > 0.0:
                 out[t, j] = np.float32(weighted[j] / weight_total[j])
                 considered += 1
                 if m < d:
@@ -227,7 +265,7 @@ def decay_linear(x, d, min_periods):
 
 
 @njit(**KERNEL_FLAGS)
-def correlation(x, y, d, min_periods):
+def correlation(x, y, d, min_periods, first_row):
     """Rolling Pearson correlation over pairwise-complete observations.
 
     A day enters the window only if both inputs are present on it, so the
@@ -277,17 +315,19 @@ def correlation(x, y, d, min_periods):
                     count[j] -= 1
 
             m = count[j]
-            if t >= d - 1 and m >= min_periods and m >= 2:
+            if t >= first_row and m >= min_periods and m >= 2:
                 mean_x = sx[j] / m
                 mean_y = sy[j] / m
                 var_x = sxx[j] - mean_x * sx[j]
                 var_y = syy[j] - mean_y * sy[j]
                 if var_x < 0.0:
+                    if var_x < -VARIANCE_TOLERANCE * (sxx[j] / m + 1.0):
+                        clamped += 1
                     var_x = 0.0
-                    clamped += 1
                 if var_y < 0.0:
+                    if var_y < -VARIANCE_TOLERANCE * (syy[j] / m + 1.0):
+                        clamped += 1
                     var_y = 0.0
-                    clamped += 1
                 if var_x > 0.0 and var_y > 0.0:
                     cov = sxy[j] - mean_x * sy[j]
                     r = cov / np.sqrt(var_x * var_y)
@@ -317,7 +357,7 @@ def correlation(x, y, d, min_periods):
 
 
 @njit(**KERNEL_FLAGS)
-def _extremum(x, d, min_periods, want_max, want_index):
+def _extremum(x, d, min_periods, first_row, want_max, want_index):
     """Shared driver for ts_min, ts_max and ts_argmax.
 
     ``want_index`` returns rows elapsed since the extreme rather than its
@@ -331,45 +371,60 @@ def _extremum(x, d, min_periods, want_max, want_index):
     n_days, n_inst = x.shape
     out = np.full((n_days, n_inst), np.nan, dtype=np.float32)
     ring = np.zeros((d, n_inst), dtype=np.int32)
+    # Head and tail are ring positions rather than monotonic counters, and
+    # size distinguishes empty from full. Counters would need a modulo on
+    # every access, and an integer division in the inner loop of a kernel
+    # that runs once per cell is not a rounding error in the budget.
     head = np.zeros(n_inst, dtype=np.int64)
     tail = np.zeros(n_inst, dtype=np.int64)
+    size = np.zeros(n_inst, dtype=np.int64)
     count = np.zeros(n_inst, dtype=np.int64)
     degraded = 0
     considered = 0
 
     for t in range(n_days):
+        oldest = t - d
         for j in range(n_inst):
             # Expire first. After a push the deque can hold at most d
             # indices, but expiring afterwards would let it briefly hold
             # d + 1 and wrap the ring onto its own front.
-            while tail[j] > head[j] and ring[head[j] % d, j] <= t - d:
+            while size[j] > 0 and ring[head[j], j] <= oldest:
                 head[j] += 1
+                if head[j] == d:
+                    head[j] = 0
+                size[j] -= 1
 
             v = x[t, j]
             if v == v:
                 # Drop indices that this value dominates: they can never be
                 # the extreme again while it is in the window.
-                while tail[j] > head[j]:
-                    last = ring[(tail[j] - 1) % d, j]
-                    prior = x[last, j]
+                while size[j] > 0:
+                    last = tail[j] - 1
+                    if last < 0:
+                        last = d - 1
+                    prior = x[ring[last, j], j]
                     if want_max:
                         dominated = prior <= v
                     else:
                         dominated = prior >= v
                     if not dominated:
                         break
-                    tail[j] -= 1
-                ring[tail[j] % d, j] = t
+                    tail[j] = last
+                    size[j] -= 1
+                ring[tail[j], j] = t
                 tail[j] += 1
+                if tail[j] == d:
+                    tail[j] = 0
+                size[j] += 1
                 count[j] += 1
             if t >= d:
-                w = x[t - d, j]
+                w = x[oldest, j]
                 if w == w:
                     count[j] -= 1
 
             m = count[j]
-            if t >= d - 1 and m >= min_periods and tail[j] > head[j]:
-                front = ring[head[j] % d, j]
+            if t >= first_row and m >= min_periods and size[j] > 0:
+                front = ring[head[j], j]
                 if want_index:
                     out[t, j] = np.float32(t - front)
                 else:
@@ -381,21 +436,21 @@ def _extremum(x, d, min_periods, want_max, want_index):
 
 
 @njit(**KERNEL_FLAGS)
-def ts_max(x, d, min_periods):
+def ts_max(x, d, min_periods, first_row):
     """Rolling maximum over present observations."""
-    return _extremum(x, d, min_periods, True, False)
+    return _extremum(x, d, min_periods, first_row, True, False)
 
 
 @njit(**KERNEL_FLAGS)
-def ts_min(x, d, min_periods):
+def ts_min(x, d, min_periods, first_row):
     """Rolling minimum over present observations."""
-    return _extremum(x, d, min_periods, False, False)
+    return _extremum(x, d, min_periods, first_row, False, False)
 
 
 @njit(**KERNEL_FLAGS)
-def ts_argmax(x, d, min_periods):
+def ts_argmax(x, d, min_periods, first_row):
     """Rows elapsed since the window maximum, 0 meaning today."""
-    return _extremum(x, d, min_periods, True, True)
+    return _extremum(x, d, min_periods, first_row, True, True)
 
 
 # --------------------------------------------------------------------------
@@ -404,7 +459,7 @@ def ts_argmax(x, d, min_periods):
 
 
 @njit(**KERNEL_FLAGS)
-def ts_rank(x, d, min_periods):
+def ts_rank(x, d, min_periods, first_row):
     """Rank of x[t] among the present observations of its trailing window.
 
     Normalised by the present count m, never by the window length d. Dividing
@@ -428,7 +483,7 @@ def ts_rank(x, d, min_periods):
     considered = 0
 
     for j in range(n_inst):
-        for t in range(d - 1, n_days):
+        for t in range(first_row, n_days):
             v = x[j, t]
             if v != v:
                 continue
@@ -450,3 +505,39 @@ def ts_rank(x, d, min_periods):
                 if m < d:
                     degraded += 1
     return out, degraded, considered, 0
+
+
+# --------------------------------------------------------------------------
+# per-cell fill, for debug_fill only
+# --------------------------------------------------------------------------
+
+
+@njit(**KERNEL_FLAGS)
+def window_fill(x, d, first_row):
+    """Fraction of each window that was present, as a plane.
+
+    Only the NaN pattern of the input and the window length determine this,
+    not which operator is about to consume it, so one kernel serves every
+    windowed operator and no operator needs a second implementation to
+    support ``debug_fill``.
+
+    This is the expensive representation the scalar counters exist to avoid:
+    one float32 plane per windowed node. It is computed only on demand, for
+    the rare survivor whose degradation needs attributing cell by cell.
+    """
+    n_days, n_inst = x.shape
+    out = np.full((n_days, n_inst), np.nan, dtype=np.float32)
+    count = np.zeros(n_inst, dtype=np.int64)
+
+    for t in range(n_days):
+        for j in range(n_inst):
+            v = x[t, j]
+            if v == v:
+                count[j] += 1
+            if t >= d:
+                w = x[t - d, j]
+                if w == w:
+                    count[j] -= 1
+            if t >= first_row:
+                out[t, j] = np.float32(count[j] / d)
+    return out
