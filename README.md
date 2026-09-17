@@ -15,6 +15,7 @@ for the fact that a large number were tried.
 | 0     | `alpha.registry` | append-only trial ledger (SQLite)            | done                    |
 | 1     | `alpha.data`     | panel adapters, cost model, trading calendar | done                    |
 | 2     | `alpha.expr`     | grammar, AST, evaluator, numba kernels       | done                    |
+| 3     | `alpha.screen`   | metrics, the cheap screen, decile portfolios | done                    |
 
 Each layer depends only on the ones below it. There is no global state
 anywhere, and every source of randomness is an explicitly passed
@@ -56,6 +57,9 @@ accruals need a point-in-time source carrying both a report date and a
 knowledge date. Adding them against a source without the latter would
 introduce restatement look-ahead that no assertion in this layer could catch,
 so they wait for the right source rather than arriving on a weak one.
+
+`docs/REPRODUCIBILITY.md` states what has to be recorded for a logged result
+to be regenerable, and what breaks when each part is missing.
 
 `docs/PARQUET_LAYOUT.md` documents the on-disk contract `USAdapter` expects,
 the invariants it asserts at load, and the leaks it can only measure and
@@ -226,14 +230,47 @@ the operator as a `Domain`:
   infinity survives every downstream operator and surfaces only as a nonsense
   IC, whereas a NaN is caught by the coverage checks.
 
+### Layer 3, the screen
+
+One candidate in, one verdict out, and a ledger row for every distinct
+hypothesis that was actually tested.
+
+Checks run cheapest first, and the ordering is the design. A structural
+duplicate never touches the panel. A root `rank` is elided, because it is a
+no-op for everything a rank-based screen measures and costs the better part of
+a second. Coverage and degradation come free from the evaluation. Only then is
+the signal ranked, once, and dispersion, the value hash, the IC and the
+turnover all reuse that one array.
+
+A signal observed on date *t* is scored against the return earned on *t+1*.
+That shift happens in exactly one function, `metrics.forward_returns`, so
+there is one line in the system to get right. The test for it feeds today's
+return in as the signal and asserts the IC is near zero, with a control that
+feeds tomorrow's return in and asserts it scores above 0.99.
+
+Three things do not earn a ledger row: a candidate rejected before evaluation,
+a structural duplicate, and a candidate whose ranked values match one already
+tested. The last is the interesting one. `x`, `rank(x)`, `zscore(x)` and
+`log(x)` all rank identically, so they produce the same IC, deciles and
+turnover by construction. They are one hypothesis spelled four ways, and since
+N enters the Deflated Sharpe through `sqrt(2 ln N)`, counting four would
+discard real results to guard against a risk that was never taken.
+`trials.value_hash` is the hash of the ranked signal, which is what makes the
+collapse detectable. `sign(x)` correctly does not collapse: it is monotone but
+not strictly, and coarsening to three levels changes the ranks.
+
 ## Verification
 
-`scripts/verify_momentum.py` builds 12-1 momentum as
-`div(ts_delay(close, 20), ts_delay(close, 250))`, forms monthly rebalanced
-deciles, and checks monthly correlation above 0.9 against Ken French's UMD
-over the identical sample. Correlation rather than a level match, because
-French's construction differs in universe, weighting and breakpoints, and only
-the month-to-month shape is driven by the underlying effect.
+`scripts/check_decile_machinery.py` plants a known 12-1 momentum effect in
+synthetic returns and asserts the decile sort finds it, and that it reports
+nothing when nothing is planted. It validates the harness, not the market.
+
+`scripts/verify_momentum.py` is the open milestone and has never been run
+against data that can satisfy it. It exists to test the data pipeline, which
+is the one thing synthetic data cannot: delisting composition, adjustment
+factors and point-in-time alignment are all satisfied by construction in a
+generated panel. Pass criterion is monthly correlation above 0.9 with Ken
+French's UMD.
 
 `scripts/check_lookahead.py` asserts prefix equality across 500 random trees:
 evaluating on `panel[:k]` must equal evaluating on the full panel and slicing
@@ -283,10 +320,15 @@ alpha/
     ast.py              immutable trees
     evaluator.py        bottom-up evaluation
     kernels.py          numba incremental kernels
+  screen/
+    metrics.py          forward returns, rank IC, turnover, coverage
+    portfolio.py        decile sorts on a monthly rebalance
+    screen.py           the cheap screen
   logging_config.py     structured JSON logging
 scripts/
-  verify_momentum.py    12-1 momentum against French UMD
-  check_lookahead.py    prefix equality across 500 random trees
+  check_decile_machinery.py  planted momentum, harness only
+  verify_momentum.py         open milestone, needs real data
+  check_lookahead.py         prefix equality across 500 random trees
 docs/
   PARQUET_LAYOUT.md     what USAdapter expects on disk
 ```
