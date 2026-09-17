@@ -77,9 +77,9 @@ class SyntheticSpec:
     n_sectors: int = 11
 
     momentum_strength: float = 0.0
-    """Fraction of next-period return explained by trailing 12-1 return.
-    Zero by default: synthetic data should not accidentally validate a
-    hypothesis."""
+    """Planted 12-1 momentum, in daily standard deviations per sigma of
+    trailing return. Zero by default: synthetic data should not accidentally
+    validate a hypothesis."""
 
     def __post_init__(self) -> None:
         if self.n_days < 2 or self.n_instruments < 2:
@@ -226,14 +226,23 @@ def _returns(
     values = rng.normal(daily_drift, daily_vol, size=tradable.shape)
 
     if spec.momentum_strength:
-        values = _plant_momentum(values, spec.momentum_strength)
+        values = _plant_momentum(values, spec.momentum_strength, daily_vol)
 
     values[~tradable] = np.nan
     return values.astype(np.float64)
 
 
-def _plant_momentum(values: np.ndarray, strength: float) -> np.ndarray:
+def _plant_momentum(
+    values: np.ndarray, strength: float, daily_vol: float
+) -> np.ndarray:
     """Add a component of next-period return explained by trailing 12-1 return.
+
+    ``strength`` is measured in daily standard deviations, not in return. A
+    one-sigma trailing winner gets ``strength * daily_vol`` added to its daily
+    return. Scaling by the series' own volatility is what keeps the parameter
+    meaningful: as an absolute daily return, a strength of 0.06 would be six
+    per cent a day compounding, which drives prices past the float32 range
+    within a few years and produces a panel the validator rightly refuses.
 
     Strictly backward looking: the return on day t is nudged by a window that
     ends on day t-21. A planted effect that peeked forward would make every
@@ -247,7 +256,7 @@ def _plant_momentum(values: np.ndarray, strength: float) -> np.ndarray:
         centred = trailing - np.nanmean(trailing)
         scale = np.nanstd(centred)
         if scale > 0:
-            planted[t] += strength * centred / scale
+            planted[t] += strength * daily_vol * centred / scale
     return planted
 
 
