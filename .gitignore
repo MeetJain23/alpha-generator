@@ -1,0 +1,38 @@
+# byte-compiled
+__pycache__/
+*.py[cod]
+*.so
+
+# environments
+.venv/
+venv/
+env/
+
+# packaging
+build/
+dist/
+*.egg-info/
+
+# tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.benchmarks/
+
+# data + artifacts (never commit market data or the registry)
+# Anchored to the repo root with a leading slash. An unanchored "data/"
+# matches at any depth, which silently excluded the alpha/data package.
+/data/
+/cache/
+/runs/
+*.parquet
+*.npz
+*.sqlite
+*.sqlite3
+*.db
+
+# editors / os
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
