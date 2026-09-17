@@ -59,7 +59,10 @@ introduce restatement look-ahead that no assertion in this layer could catch,
 so they wait for the right source rather than arriving on a weak one.
 
 `docs/REPRODUCIBILITY.md` states what has to be recorded for a logged result
-to be regenerable, and what breaks when each part is missing.
+to be regenerable, what breaks when each part is missing, and where the asset
+line falls. In short: the machinery is public because there is no edge in it,
+and the registry, the pool and any surviving expression are never committed,
+because an expression string is the strategy and it fits in a tweet.
 
 `docs/PARQUET_LAYOUT.md` documents the on-disk contract `USAdapter` expects,
 the invariants it asserts at load, and the leaks it can only measure and

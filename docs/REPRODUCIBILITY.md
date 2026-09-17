@@ -189,6 +189,75 @@ between invalidating a subset and invalidating everything.
 dangles, a matching source hash still proves the code was byte-identical, and
 it survives anything done to the repository or its graph.
 
+## The asset line
+
+The repository splits in two, and the split is not about sensitivity in the
+usual sense. Everything here is either infrastructure, which has no value to
+anyone who does not also have the data and the compute, or it is the result,
+which is the entire point of the exercise.
+
+### Public: the machinery
+
+The grammar, the evaluator, the kernels, the screen, the gauntlet, the
+adapters, the scripts and the tests. All of it.
+
+There is no edge in any of it. An operator set, a rank IC and a purged
+cross-validation are published in a dozen textbooks, and anyone capable of
+using this code already knows how to write it. What takes the time is getting
+the details right, and the details are the assertions, which are worth more
+to their author as review-bait than as a secret. A rolling variance that
+cancels in float32, a window that emits before its warmup, a decay that fails
+to renormalise: those are the kind of thing another reader catches, and
+publishing is how the reader arrives.
+
+### Never committed: the result
+
+The registry database. The accepted pool. Any surviving expression, in any
+form, including in a commit message, a docstring, a test fixture, a README
+example or a notebook output cell.
+
+**Invariant:** no file matching the registry, pool or panel patterns is ever
+tracked, and no surviving expression appears in a tracked file.
+
+**What breaks otherwise:** a public repository containing surviving
+expressions is a public repository containing the strategy. Not a hint at it
+or a description of it. The expression string is the strategy, it is short
+enough to fit in a tweet, and `from_string` turns it back into a running
+signal in one call. There is no partial disclosure here: one line of a pool
+table is the whole thing.
+
+This is the one asymmetry worth being careful about. The machinery took most
+of the effort and is worth publishing. The output took most of the compute and
+is worth nothing once shared, because an alpha that other people are trading
+is an alpha that has already been arbitraged. Publishing the first costs
+nothing and publishing the second costs everything, and the two live in the
+same working directory.
+
+### How it is enforced
+
+Not by care. `.gitignore` anchors `/data/`, `/cache/`, `/runs/` and
+`/scratch/` to the repository root, and denies `*.db`, `*.sqlite`, `*.parquet`,
+`*.npz`, `*.csv` and `*.ipynb` at any depth. `tests/test_repository.py`
+asserts that nothing matching those patterns is tracked, and `pre-commit`
+refuses the commit rather than reporting it afterwards.
+
+Notebooks are denied outright rather than filtered, because a notebook carries
+its output cells inside the file. A `head()` of a vendor panel or a printed
+pool table becomes a committed artefact, and it survives review because nobody
+reads a JSON blob of base64.
+
+### The consequence for reproducibility
+
+A result logged in the registry cannot be reproduced from this repository
+alone, and that is deliberate rather than an oversight. The four things a run
+needs are listed at the top of this document, and two of them, the data and
+the ledger, live outside version control on purpose.
+
+What the repository guarantees is that given the data and the ledger, the code
+that produced a number can be identified exactly, through `git_sha` and
+`source_hash`. That is the half that can be made public without giving
+anything away.
+
 ## Practical checklist
 
 Before trusting a logged result:
