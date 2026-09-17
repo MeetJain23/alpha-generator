@@ -7,26 +7,36 @@ roughly 570MB and several seconds to generate. Run with::
 
 On the 50ms target
 ------------------
-The design goal was under 50ms per depth-4 tree on a 2500 x 3000 panel. That
-holds for the part of the grammar the goal describes and not for the rest, and
-the thresholds below say which is which rather than being tuned until they
-pass.
+The design goal was under 50ms per depth-4 tree on a 2500 x 3000 panel. It is
+not met, and the thresholds below say which parts come close rather than being
+tuned until they pass.
 
-A single float32 plane here is 30MB. An elementwise operator reads two and
-writes one, so at a realistic 15GB/s it cannot beat about 6ms, and a depth-4
-tree of five such nodes cannot beat about 30ms. That is the memory-bandwidth
-bound the design was aimed at, and the running-sum kernels and elementwise
-operators land near it.
+Measure the machine before reading any of this. A float32 plane here is 30MB,
+and on the development machine ``np.copy`` of one runs at about 7GB/s, not the
+20 to 25GB/s a modern desktop is usually quoted at. So a three-stream
+operator, reading a window's leaving value and its arriving value and writing
+one output, has a floor near 12ms rather than near 3ms. A quoted bandwidth
+figure is an upper bound on a machine nobody is running, and comparing against
+it makes every kernel look sixteen times worse than it is.
 
-The rank family does not, and cannot, because ranking requires a sort and a
-sort is not a streaming pass over memory. ``rank`` argsorts 2500 rows of 3000
-values; ``ts_rank`` scans its window per cell, since a sliding window rank has
-no constant-time update; ``rank_within`` currently pays a lexicographic sort
-over every defined cell. These are hundreds of milliseconds to seconds, and no
-amount of care with temporaries changes the asymptotics.
+Against the measured floor the streaming kernels are within roughly twice:
+ts_mean is 29ms against a 12ms floor for the same memory traffic with no
+arithmetic at all. The remaining gap is branch overhead in the inner loop,
+which a branch-free two-phase formulation recovers about a quarter of. That is
+recorded rather than applied, because it doubles the length of every kernel
+for a change that leaves the op within the same factor of the floor.
 
-So the assertions are split. The streaming operators are held to a bound near
-the bandwidth limit. The sorting operators are held to a generous ceiling that
+The rank family cannot reach the floor, because ranking needs a sort and a
+sort is not a streaming pass. ``rank`` spends 370ms of its time in argsort
+alone, which is irreducible. ``ts_rank`` scans its window per cell, since a
+sliding window rank has no constant-time update.
+
+Loop order is not the problem and was checked: the kernels iterate time-outer
+and instrument-inner, matching the row-major panel, and the deliberately wrong
+order measures 95ms against 27ms for the same kernel.
+
+So the assertions are split. The streaming operators are held near the
+measured bandwidth limit. The sorting operators are held to a ceiling that
 catches a regression without pretending the target applies to them.
 """
 
@@ -56,8 +66,10 @@ one of these is roughly 6ms; the headroom absorbs a loaded machine."""
 STREAMING_TREE_BUDGET_MS = 260.0
 """A depth-4 tree built only from streaming operators."""
 
-SORTING_CEILING_MS = 9000.0
-"""A regression guard for the rank family, not a target."""
+SORTING_CEILING_MS = 3500.0
+"""A regression guard for the rank family, not a target. rank_within was
+7.2s before it was rewritten around two per-row passes; this would catch a
+return to anything like that."""
 
 
 @pytest.fixture(scope="module")

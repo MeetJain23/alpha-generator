@@ -473,49 +473,73 @@ def _rank(node: Node, c: list[np.ndarray]) -> np.ndarray:
     return rank_rows(c[0])
 
 
+def _average_positions(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Per-day average ordinal position of each value, and the day's count.
+
+    Position is 0-based among the row's non-NaN entries, and a run of equal
+    values shares the average of the positions it spans. NaN cells come back
+    NaN and are excluded from the count.
+
+    Ties are averaged rather than broken by order of appearance. That is not
+    a nicety: sign and ts_argmax produce heavily tied output, volume ties on
+    round numbers, and low-priced names tie on price. Breaking ties by
+    instrument index would make the result depend on column order, which is
+    an arbitrary property of the panel, and the search would find it.
+
+    Shared by rank and rank_within so the tie handling is written once. Kept
+    in float32, because positions run to a few thousand and are exact there,
+    and every full-size temporary on a real panel is 30MB of traffic.
+    """
+    n_days, n_inst = x.shape
+    counts = np.count_nonzero(~np.isnan(x), axis=1).astype(np.float32)
+
+    order = np.argsort(x, axis=1, kind="stable")
+    sorted_values = np.take_along_axis(x, order, axis=1)
+    positions = np.arange(n_inst, dtype=np.float32)
+
+    # A run boundary is where the sorted value changes. NaN never equals
+    # itself, so trailing NaNs each form their own run and fall out below.
+    changed = np.empty((n_days, n_inst), dtype=bool)
+    changed[:, 0] = True
+    np.not_equal(sorted_values[:, 1:], sorted_values[:, :-1], out=changed[:, 1:])
+
+    run_start = np.where(changed, positions, np.float32(-1.0))
+    np.maximum.accumulate(run_start, axis=1, out=run_start)
+
+    ends = np.empty((n_days, n_inst), dtype=bool)
+    ends[:, -1] = True
+    ends[:, :-1] = changed[:, 1:]
+    # Reversed accumulation on a contiguous copy. Accumulating through a
+    # negative-stride view is markedly slower than paying for the copy.
+    run_end = np.ascontiguousarray(
+        np.where(ends, positions, np.float32(n_inst))[:, ::-1]
+    )
+    np.minimum.accumulate(run_end, axis=1, out=run_end)
+    run_end = run_end[:, ::-1]
+
+    average = run_start
+    average += run_end
+    average *= np.float32(0.5)
+
+    scattered = np.empty((n_days, n_inst), dtype=DTYPE)
+    np.put_along_axis(scattered, order, average, axis=1)
+    scattered[np.isnan(x)] = np.nan
+    return scattered, counts
+
+
 def rank_rows(x: np.ndarray) -> np.ndarray:
     """Per-day centred rank, ties averaged, NaN excluded from the population.
 
     ``(position + 0.5) / n - 0.5`` over the day's non-NaN entries, so the row
     sums to zero and a ranked signal is already a zero-net-exposure score.
-
-    Ties are averaged rather than broken arbitrarily. That is not a detail:
-    operators like sign and ts_argmax produce heavily tied output, and
-    breaking ties by instrument order would turn the instrument axis into a
-    signal.
     """
-    n_days, n_inst = x.shape
-    valid = ~np.isnan(x)
-    counts = valid.sum(axis=1)
-
-    order = np.argsort(x, axis=1, kind="stable")
-    sorted_values = np.take_along_axis(x, order, axis=1)
-
-    positions = np.broadcast_to(
-        np.arange(n_inst, dtype=np.float64), (n_days, n_inst)
-    )
-    # A run of equal values shares one averaged position. NaN never equals
-    # itself, so trailing NaNs each form their own run and are masked out.
-    starts_run = np.empty((n_days, n_inst), dtype=bool)
-    starts_run[:, 0] = True
-    np.not_equal(sorted_values[:, 1:], sorted_values[:, :-1], out=starts_run[:, 1:])
-    ends_run = np.empty((n_days, n_inst), dtype=bool)
-    ends_run[:, -1] = True
-    ends_run[:, :-1] = starts_run[:, 1:]
-
-    run_start = np.maximum.accumulate(np.where(starts_run, positions, -1.0), axis=1)
-    reversed_ends = np.where(ends_run, positions, float(n_inst))[:, ::-1]
-    run_end = np.minimum.accumulate(reversed_ends, axis=1)[:, ::-1]
-    average_position = 0.5 * (run_start + run_end)
-
-    with np.errstate(divide="ignore", invalid="ignore"):
-        ranked = (average_position + 0.5) / counts[:, None] - 0.5
-
-    out = np.full((n_days, n_inst), np.nan, dtype=DTYPE)
-    np.put_along_axis(out, order, ranked.astype(DTYPE, copy=False), axis=1)
-    out[~valid] = np.nan
-    out[counts == 0] = np.nan
-    return out
+    positions, counts = _average_positions(x)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        positions += np.float32(0.5)
+        positions /= np.where(counts > 0, counts, np.float32(1.0))[:, None]
+        positions -= np.float32(0.5)
+    positions[counts == 0] = np.nan
+    return positions
 
 
 def _zscore(node: Node, c: list[np.ndarray]) -> np.ndarray:
@@ -597,12 +621,21 @@ def _demean_by(node: Node, c: list[np.ndarray]) -> np.ndarray:
 def _rank_within(node: Node, c: list[np.ndarray]) -> np.ndarray:
     """Centred rank within the instrument's own group that day.
 
-    One lexicographic sort over the defined cells rather than one sort per
-    group: the number of groups is a property of the vendor's taxonomy and
-    should not appear in the cost.
+    Two per-row passes rather than one lexicographic sort over every defined
+    cell. The old form sorted seven and a half million (key, value) pairs
+    globally and cost seconds; this sorts rows, which is what numpy is fast
+    at, and the group structure is recovered arithmetically.
 
-    A group holding one instrument that day is NaN, since a rank with no
-    population to rank against carries no information.
+    Rank the row once to get each value's position, map that to (0, 1), and
+    add the integer group label. The result lies strictly inside
+    ``(g, g + 1)``, so ordering the composite orders by group first and by
+    value within a group, and equal values inside a group keep an equal
+    composite so they tie again. Ranking that composite gives each cell its
+    position in a row laid out group by group, and subtracting where its own
+    group starts leaves its position within the group.
+
+    A group below ``MIN_GROUP_SIZE`` is NaN: a centred rank over two names is
+    always plus or minus 0.25 whatever the values are.
     """
     x, groups = c
     out = np.full(x.shape, np.nan, dtype=DTYPE)
@@ -610,45 +643,35 @@ def _rank_within(node: Node, c: list[np.ndarray]) -> np.ndarray:
     if span == 0:
         return out
 
-    values = x[valid].astype(np.float64)
-    order = np.lexsort((values, keys))
-    sorted_keys = keys[order]
-    sorted_values = values[order]
-    n = sorted_keys.size
-    positions = np.arange(n, dtype=np.float64)
+    within_row, counts = _average_positions(np.where(valid, x, np.nan))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        fraction = (within_row + np.float32(0.5)) / np.where(
+            counts > 0, counts, np.float32(1.0)
+        )[:, None]
 
-    block_start_flag = np.empty(n, dtype=bool)
-    block_start_flag[0] = True
-    np.not_equal(sorted_keys[1:], sorted_keys[:-1], out=block_start_flag[1:])
-    block_start = np.maximum.accumulate(np.where(block_start_flag, positions, -1.0))
-    block_end_flag = np.empty(n, dtype=bool)
-    block_end_flag[-1] = True
-    block_end_flag[:-1] = block_start_flag[1:]
-    block_end = np.minimum.accumulate(
-        np.where(block_end_flag, positions, float(n))[::-1]
-    )[::-1]
-    block_size = block_end - block_start + 1.0
+    composite = np.where(valid, groups + fraction, np.nan).astype(DTYPE, copy=False)
+    across_row, _ = _average_positions(composite)
 
-    tie_start_flag = block_start_flag | np.concatenate(
-        ([True], sorted_values[1:] != sorted_values[:-1])
-    )
-    tie_end_flag = np.empty(n, dtype=bool)
-    tie_end_flag[-1] = True
-    tie_end_flag[:-1] = tie_start_flag[1:]
-    tie_start = np.maximum.accumulate(np.where(tie_start_flag, positions, -1.0))
-    tie_end = np.minimum.accumulate(
-        np.where(tie_end_flag, positions, float(n))[::-1]
-    )[::-1]
+    # Where each group's block starts in that row, and how big it is.
+    size = x.shape[0] * span
+    per_group = np.bincount(keys, minlength=size).reshape(x.shape[0], span)
+    block_start = np.cumsum(per_group, axis=1) - per_group
 
-    within = 0.5 * (tie_start + tie_end) - block_start
+    labels = groups[valid].astype(np.int64)
+    rows = np.broadcast_to(
+        np.arange(x.shape[0], dtype=np.int64)[:, None], x.shape
+    )[valid]
+    starts = block_start[rows, labels].astype(np.float32)
+    sizes = per_group[rows, labels].astype(np.float32)
+
+    within_group = across_row[valid] - starts
     with np.errstate(invalid="ignore", divide="ignore"):
         ranked = np.where(
-            block_size >= MIN_GROUP_SIZE, (within + 0.5) / block_size - 0.5, np.nan
+            sizes >= MIN_GROUP_SIZE,
+            (within_group + np.float32(0.5)) / sizes - np.float32(0.5),
+            np.nan,
         )
-
-    scattered = np.empty(n, dtype=np.float64)
-    scattered[order] = ranked
-    out[valid] = scattered.astype(DTYPE, copy=False)
+    out[valid] = ranked.astype(DTYPE, copy=False)
     return out
 
 
