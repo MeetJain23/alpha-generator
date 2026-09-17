@@ -26,7 +26,7 @@ include = ["alpha*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --strict-markers"
+addopts = "-q --strict-markers -m 'not slow'"
 markers = [
     "benchmark: performance assertions; may be slow on cold numba caches",
     "slow: excluded from the default fast loop",
