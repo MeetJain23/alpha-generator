@@ -14,7 +14,7 @@ for the fact that a large number were tried.
 | ----- | ---------------- | -------------------------------------------- | ----------------------- |
 | 0     | `alpha.registry` | append-only trial ledger (SQLite)            | done                    |
 | 1     | `alpha.data`     | panel adapters, cost model, trading calendar | done                    |
-| 2     | `alpha.expr`     | grammar, AST, evaluator, numba kernels       | grammar and AST done    |
+| 2     | `alpha.expr`     | grammar, AST, evaluator, numba kernels       | done                    |
 
 Each layer depends only on the ones below it. There is no global state
 anywhere, and every source of randomness is an explicitly passed
@@ -152,12 +152,37 @@ cross-sectional ops already perform on the day's population, and it adds no
 look-ahead, since the window still ends at *t*. The floor is what keeps it
 honest by refusing a result built from a handful of scattered observations.
 
-Because this constant changes every signal, the screen's coverage metric
-measures realized window fill rather than only whether the output is non-NaN.
-A signal that produces values everywhere while running on windows that are
-barely above the floor is a different object from one running on full windows,
-and the coverage metric has to make that visible rather than scoring both as
-fully covered.
+Because this constant changes every signal, coverage is measured on realized
+window fill rather than on whether the output is non-NaN. A signal producing
+values everywhere on windows barely above the floor is a different object from
+one running on full windows, and a non-NaN count scores both as fully covered.
+
+`EvalResult` carries one float per node: the fraction of the cells that node
+emitted from a partial window. The screen kills on `max(degradation)` and the
+index of the maximum names the operator responsible.
+
+A per-cell fill plane at the root would be cheaper and wrong. In
+`ts_mean(ts_mean(close, 20), 250)` the outer mean reads the inner mean's
+output, which is non-NaN wherever the inner window cleared its floor, so a
+root-level fill reports a full window while the data underneath was thin.
+Composing fill correctly means carrying a plane up through every node, which
+costs what per-subtree planes cost. Per-node scalars are cheap and right for
+the question actually being asked, and `debug_fill=True` replays with full
+per-cell planes for the rare survivor that needs one.
+
+### Performance
+
+A float32 plane on a 2500 x 3000 panel is 30MB, so an elementwise operator
+reading two and writing one cannot beat roughly 6ms at realistic bandwidth.
+The streaming operators and running-sum kernels land near that bound, and a
+depth-4 tree built from them runs in well under a second.
+
+The rank family does not and cannot, because ranking needs a sort and a sort
+is not a streaming pass. `rank` argsorts every row, `ts_rank` scans its window
+per cell since a sliding rank has no constant-time update, and `rank_within`
+currently pays a lexicographic sort over every defined cell. `tests/
+test_benchmark.py` holds the two classes to separate thresholds rather than
+one threshold tuned until it passes.
 
 ### Normalisation
 
