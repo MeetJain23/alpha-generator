@@ -29,6 +29,13 @@ what a signal evaluates to, and refuses to write a run without them. It also
 records a fingerprint of the operator registry, so that a grammar edit between
 two runs is visible in the ledger rather than inferred from the calendar.
 Runs whose fingerprints differ are not comparable, whatever their configs say.
+
+``git_sha`` and ``source_hash`` are both recorded, because retrieval and
+verification are different problems: the SHA says where to find the code, the
+source hash says whether the code you found is the code that ran.
+
+``docs/REPRODUCIBILITY.md`` states the whole contract, including why this
+table is append-only and why the git history has to be treated the same way.
 """
 
 from __future__ import annotations

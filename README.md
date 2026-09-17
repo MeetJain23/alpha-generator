@@ -31,10 +31,15 @@ real multiple-testing burden and the deflation would come out optimistic,
 which is the exact failure the deflation exists to prevent. Every candidate
 counts, including the ones killed on the first check.
 
-`runs.config_json` records the git SHA together with every constant that
-changes what a signal evaluates to, `MIN_PERIODS_FRACTION` among them. Runs
-with different values are not comparable, and recording the value is what
-makes that detectable afterwards rather than a matter of memory.
+`runs.config_json` records every constant that changes what a signal
+evaluates to, `MIN_PERIODS_FRACTION` among them, alongside `git_sha` for
+retrieval and `source_hash` for verification. Runs with different values are
+not comparable, and recording them is what makes that detectable afterwards
+rather than a matter of memory.
+
+`docs/REPRODUCIBILITY.md` is the contract that makes a logged result
+regenerable: what has to be recorded, and what breaks when each part is
+missing.
 
 ### Layer 1, data
 
