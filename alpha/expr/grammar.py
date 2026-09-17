@@ -83,6 +83,23 @@ how each windowed operator does that, because the answer is not the same for
 all of them: point lookups need their endpoints, decay_linear must renormalise
 its weights over what is present, and correlation counts pairwise-complete
 days.
+
+Normalise by what is present, never by the window length
+--------------------------------------------------------
+Any operator that divides by a count must divide by ``m``, the number of
+present observations in the window, and not by ``d``. This is one rule with
+two instances so far, ``ts_rank`` and ``decay_linear``, and it is the same
+mistake both times.
+
+Dividing by ``d`` compresses a degraded window toward the middle of the
+operator's output range: a ts_rank over 40 present observations in a 250-day
+window would report at most 0.16 however extreme the value was, and a
+decay_linear would report a fraction of its true magnitude. The compression is
+not random. Missing observations concentrate in halted, thinly traded and
+recently listed names, so the signal would be systematically damped for
+exactly one group of instruments, and the search would discover that group as
+a factor. A liquidity factor manufactured by an arithmetic slip is worse than
+no factor at all, because it is real in the backtest and absent in the market.
 """
 
 from __future__ import annotations
@@ -571,13 +588,18 @@ _TS_OPS: Final[tuple[OpSpec, ...]] = (
         warmup_rule=WarmupRule.WINDOW_MINUS_1,
         window_policy=WindowPolicy.MIN_PERIODS,
         weight=1.2,
-        doc="Percentile rank of x[t] within its own trailing d-day window, in "
-        "(0, 1]. Not centred, unlike the cross-sectional rank: this is a "
-        "within-instrument feature, not a cross-sectional score. "
-        "Self-normalising, so it survives regime shifts in level. "
-        "Floor of 5, for the same reason as correlation: over three or four "
-        "points the rank carries little more than the sign of a recent "
-        "change, which sign(delta(x, d)) already expresses more cheaply.",
+        doc="Percentile rank of x[t] among the present observations of its "
+        "own trailing d-day window, in (0, 1]. Normalised by the present "
+        "count m, never by the window length d: dividing by d would cap a "
+        "degraded window's output at m/d and damp the signal for precisely "
+        "the halted and thinly traded names, manufacturing a liquidity "
+        "factor. Ties take the average position. Not centred, unlike the "
+        "cross-sectional rank: this is a within-instrument feature, not a "
+        "cross-sectional score. Self-normalising, so it survives regime "
+        "shifts in level. Floor of 5, for the same reason as correlation: "
+        "over three or four points the rank carries little more than the "
+        "sign of a recent change, which sign(delta(x, d)) already expresses "
+        "more cheaply.",
     ),
     OpSpec(
         name="ts_min",
@@ -614,7 +636,13 @@ _TS_OPS: Final[tuple[OpSpec, ...]] = (
         window_policy=WindowPolicy.MIN_PERIODS,
         weight=0.8,
         doc="Days since the window maximum, 0 = today, in [0, d-1]. Encodes "
-        "recency of the extreme rather than its level.",
+        "recency of the extreme rather than its level. The index is counted "
+        "in calendar positions within the window, not in present "
+        "observations: a maximum five rows back is 5 whether or not the rows "
+        "between were traded. Counting present observations instead would "
+        "make the same number mean different elapsed times in different "
+        "cells, and the values would stop being comparable across the "
+        "cross-section, which is the only way this operator is ever used.",
     ),
     OpSpec(
         name="decay_linear",
@@ -626,9 +654,14 @@ _TS_OPS: Final[tuple[OpSpec, ...]] = (
         warmup_rule=WarmupRule.WINDOW_MINUS_1,
         window_policy=WindowPolicy.RENORMALIZE,
         weight=1.2,
-        doc="Weighted mean over d days with weights d, d-1, ..., 1 normalised "
-        "to sum to 1. A smoother that keeps most of its mass on recent "
-        "observations. The standard turnover damper.",
+        doc="Weighted mean over d days with weights d, d-1, ..., 1. The "
+        "weights are renormalised over the observations actually present, "
+        "not over the full window, for the same reason ts_rank divides by m: "
+        "treating a missing observation as zero weight would shrink the "
+        "result in proportion to how much data an instrument is missing and "
+        "turn missingness into a liquidity factor. A smoother that keeps "
+        "most of its mass on recent observations. The standard turnover "
+        "damper.",
     ),
 )
 
