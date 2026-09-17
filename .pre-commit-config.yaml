@@ -1,0 +1,79 @@
+# Pre-commit hooks.
+#
+# The only defence that fires at the end of a long session, which is when a
+# stray key or a 600MB panel actually gets staged. Everything else in this
+# repository is a test, and a test runs when someone remembers to run it.
+#
+#     pip install pre-commit detect-secrets
+#     pre-commit install
+#
+# On a false positive from detect-secrets
+# ---------------------------------------
+# The committed baseline is empty: 27 plugins, zero findings. Worth recording
+# that the `tokens` and `_tokenize` identifiers in alpha/expr/ast.py were
+# expected to trip it and did not. A plain grep for credential-shaped strings
+# across this repository's history returns 216 hits, all of them that one
+# identifier; detect-secrets' keyword plugin is narrower than that and passed
+# them. So the baseline is clean on its merits rather than by suppression.
+#
+# It fired once already, on the deliberately key-shaped fixture in
+# tests/test_repository.py, and was right to. There are two correct responses
+# and the choice is about where a future reader will look.
+#
+# For a known constant in one place, mark the line:
+#
+#     SECRET = "..."  # pragma: allowlist secret
+#
+# which is visible at the site, survives the file being edited, and leaves the
+# next real finding in that file still detectable. That is what the fixture
+# uses.
+#
+# For a broader sweep, confirm every finding and regenerate the baseline:
+#
+#     detect-secrets scan > .secrets.baseline
+#     git add .secrets.baseline
+#
+# The baseline is committed so that a known-clean state is shared rather than
+# rebuilt per machine. The wrong response, every time, is disabling the hook
+# or adding a blanket exclude, because a hook that has been switched off after
+# a false positive is a hook that is off on the day it matters.
+
+repos:
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ["--baseline", ".secrets.baseline"]
+        exclude: ^\.secrets\.baseline$
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      # 500kb. Every source file here is under 50kb, and the things that would
+      # exceed this are a materialised panel or a registry, neither of which
+      # belongs in git at all.
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-yaml
+      - id: check-toml
+      # A committed .env is the failure this whole section exists to prevent.
+      - id: check-added-large-files
+        alias: no-env-files
+        name: refuse tracked .env files
+        files: ^\.env(\..*)?$
+        exclude: ^\.env\.example$
+        args: ["--maxkb=0"]
+
+# ruff and ruff-format are deliberately absent.
+#
+# pyproject.toml carries a [tool.ruff] section, but ruff has never actually
+# been run against this code, so enabling it here is not adopting a tool
+# already in use: it is a 22-file, 406-line reformat, and it would land inside
+# a security commit and touch the numba kernels, which are the highest
+# bug-cost code in the repository.
+#
+# Adopting it is a reasonable thing to do. It should be its own commit, run
+# and reviewed on its own, not a side effect of installing a secret scanner.

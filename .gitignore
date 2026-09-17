@@ -1,37 +1,78 @@
-# byte-compiled
+# --------------------------------------------------------------------------
+# Data. Vendor licences forbid redistribution, and none of it is source.
+# --------------------------------------------------------------------------
+#
+# The directory patterns are anchored to the repository root with a leading
+# slash, and they must stay that way.
+#
+# An unanchored "data/" matches at any depth, so it also matches alpha/data/.
+# That is not hypothetical: it silently excluded the entire alpha/data package
+# from every commit early in this project. The package existed on disk, the
+# README referenced it, the tests imported it and passed, and git said
+# nothing. The gap only appears on a fresh clone, by which point the history
+# that should have contained the package does not.
+#
+# That failure has the shape this whole pipeline is built to guard against.
+# It is silent, and it fails in the flattering direction: everything local
+# keeps working, so nothing prompts anyone to look. Anchoring is the fix, and
+# tests/test_repository.py asserts both halves of it, that no data file is
+# tracked and that every source file is.
+/data/
+/cache/
+/runs/
+/scratch/
+
+*.parquet
+*.npz
+*.csv
+
+# --------------------------------------------------------------------------
+# The registry and the pool. See docs/REPRODUCIBILITY.md: these are the asset.
+# --------------------------------------------------------------------------
+*.db
+*.sqlite
+*.sqlite3
+
+# --------------------------------------------------------------------------
+# Credentials. Never a file, always the environment. See alpha/config.py.
+# --------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --------------------------------------------------------------------------
+# Notebooks. A notebook embeds its output cells, so a head() of vendor data
+# or a printed key becomes a committed artefact that no diff review catches,
+# because nobody reads a JSON blob of base64. If one is ever wanted it goes
+# in /scratch/, which is ignored above.
+# --------------------------------------------------------------------------
+*.ipynb
+
+# --------------------------------------------------------------------------
+# Noise
+# --------------------------------------------------------------------------
+*.log
+
 __pycache__/
 *.py[cod]
 *.so
 
-# environments
 .venv/
 venv/
 env/
 
-# packaging
 build/
 dist/
 *.egg-info/
 
-# tooling caches
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.numba_cache/
 .benchmarks/
 
-# data + artifacts (never commit market data or the registry)
-# Anchored to the repo root with a leading slash. An unanchored "data/"
-# matches at any depth, which silently excluded the alpha/data package.
-/data/
-/cache/
-/runs/
-*.parquet
-*.npz
-*.sqlite
-*.sqlite3
-*.db
-
-# editors / os
 .vscode/
 .idea/
 .DS_Store
