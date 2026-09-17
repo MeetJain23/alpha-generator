@@ -654,3 +654,124 @@ def test_the_panel_is_never_modified(panel: Panel) -> None:
         evaluate(random_tree(rng, 4), panel)
     for name, plane in before.items():
         assert np.array_equal(panel[name], plane, equal_nan=True)
+
+
+# --------------------------------------------------------------------------
+# semantic identity
+# --------------------------------------------------------------------------
+
+
+def hash_of(text: str, panel: Panel) -> str:
+    from alpha.expr.evaluator import rank_rows, value_hash
+
+    return value_hash(rank_rows(evaluate(from_string(text), panel).values))
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "rank(delta(close, 20))",
+        "zscore(delta(close, 20))",
+        "rank(rank(delta(close, 20)))",
+        "rank(zscore(delta(close, 20)))",
+    ],
+)
+def test_a_monotone_respelling_is_the_same_hypothesis(panel: Panel, text: str) -> None:
+    """Spearman IC is invariant under a strictly monotone per-day transform,
+    so these produce the same IC, deciles and turnover. One row, not four."""
+    assert hash_of(text, panel) == hash_of("delta(close, 20)", panel)
+
+
+def test_sign_is_not_the_same_hypothesis(panel: Panel) -> None:
+    """Monotone but not strictly: coarsening to three levels changes the
+    ranks, so it earns its own row."""
+    assert hash_of("sign(delta(close, 20))", panel) != hash_of("delta(close, 20)", panel)
+
+
+def test_a_different_window_is_a_different_hypothesis(panel: Panel) -> None:
+    assert hash_of("delta(close, 20)", panel) != hash_of("delta(close, 60)", panel)
+
+
+def test_a_reversed_signal_does_not_collide(panel: Panel) -> None:
+    """A decreasing transform reverses the ranks rather than preserving them.
+    Whether a signal and its negation are one hypothesis is a separate
+    question about canonicalising sign."""
+    assert hash_of("sub(close, open)", panel) != hash_of("sub(open, close)", panel)
+
+
+def test_the_hash_is_stable_across_calls(panel: Panel) -> None:
+    assert hash_of("ts_mean(close, 20)", panel) == hash_of("ts_mean(close, 20)", panel)
+
+
+def test_the_hash_sees_the_missingness_pattern() -> None:
+    """Two signals with the same order but different coverage are different,
+    because deciles and turnover both depend on which cells are defined."""
+    from alpha.expr.evaluator import rank_rows, value_hash
+
+    full = np.array([[1.0, 2.0, 3.0, 4.0, 5.0]], dtype=DTYPE)
+    holed = full.copy()
+    holed[0, 2] = NAN
+    assert value_hash(rank_rows(full)) != value_hash(rank_rows(holed))
+
+
+def test_a_negative_nan_hashes_the_same_as_a_positive_one() -> None:
+    """A division can produce the negative bit pattern, and two identical
+    signals must not differ by the sign bit of a NaN."""
+    from alpha.expr.evaluator import value_hash
+
+    positive = np.array([[1.0, np.nan]], dtype=DTYPE)
+    negative = np.array([[1.0, np.float32(-np.nan)]], dtype=DTYPE)
+    assert value_hash(positive) == value_hash(negative)
+
+
+# --------------------------------------------------------------------------
+# root elision
+# --------------------------------------------------------------------------
+
+
+def test_eliding_the_root_rank_changes_nothing_the_screen_measures(panel: Panel) -> None:
+    from alpha.expr.ast import strip_elidable_root
+    from alpha.expr.evaluator import rank_rows, value_hash
+
+    tree = from_string("rank(ts_mean(close, 20))")
+    stripped, removed = strip_elidable_root(tree)
+    assert removed == 1 and str(stripped) == "ts_mean(close, 20)"
+    assert stripped.warmup == tree.warmup
+
+    full = rank_rows(evaluate(tree, panel).values)
+    elided = rank_rows(evaluate(stripped, panel).values)
+    assert value_hash(full) == value_hash(elided)
+    assert np.array_equal(full, elided, equal_nan=True)
+
+
+def test_elision_strips_a_whole_chain(panel: Panel) -> None:
+    from alpha.expr.ast import strip_elidable_root
+
+    stripped, removed = strip_elidable_root(from_string("rank(rank(rank(close)))"))
+    assert removed == 3 and str(stripped) == "close"
+
+
+def test_elision_leaves_a_rank_that_is_not_at_the_root(panel: Panel) -> None:
+    """ts_mean(rank(x), 20) averages ranks, which is not the rank of an
+    average, so the inner rank is load-bearing."""
+    from alpha.expr.ast import strip_elidable_root
+
+    tree = from_string("ts_mean(rank(close), 20)")
+    stripped, removed = strip_elidable_root(tree)
+    assert removed == 0 and stripped == tree
+
+
+def test_zscore_is_not_elidable(panel: Panel) -> None:
+    """It preserves order but turns a zero-dispersion day into an all-NaN
+    day, and the screen depends on which cells are defined."""
+    from alpha.expr.ast import strip_elidable_root
+
+    tree = from_string("zscore(close)")
+    stripped, removed = strip_elidable_root(tree)
+    assert removed == 0 and stripped == tree
+
+
+def test_log_is_not_elidable() -> None:
+    """It preserves order but drops every non-positive cell."""
+    assert not grammar.get("log").elidable_at_root
+    assert grammar.get("rank").elidable_at_root

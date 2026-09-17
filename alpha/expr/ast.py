@@ -211,6 +211,34 @@ def _compute_hash(op: str, params: tuple[int, ...], children: tuple[Node, ...]) 
     return sha256(payload.encode("utf-8")).hexdigest()[:_HASH_CHARS]
 
 
+def strip_elidable_root(tree: Node) -> tuple[Node, int]:
+    """Drop root operators a rank-based screen cannot distinguish.
+
+    Returns the tree to evaluate and how many nodes came off.
+
+    ``rank`` at the root is a no-op for everything the screen measures. Rank
+    IC, decile membership and turnover are all invariant under a strictly
+    monotone per-day transform, and rank preserves the NaN pattern exactly, so
+    ``rank(x)`` and ``x`` produce identical numbers everywhere it matters. On
+    a full panel that no-op costs the better part of a second, which is the
+    most expensive nothing in the system.
+
+    Only the root chain is stripped. A rank in the middle of a tree is not
+    elidable: ``ts_mean(rank(x), 20)`` averages ranks, which is a different
+    quantity from the rank of an average, and nothing about the screen makes
+    those interchangeable.
+
+    The original tree is still what gets logged. This changes what is
+    computed, never what was hypothesised.
+    """
+    node = tree
+    stripped = 0
+    while not node.is_terminal and node.spec.elidable_at_root:
+        node = node.children[0]
+        stripped += 1
+    return node, stripped
+
+
 def field_node(name: str) -> Node:
     """A terminal, by field name. Shorthand for hand-written trees."""
     return Node(name)

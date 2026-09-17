@@ -46,6 +46,7 @@ arguments are ordered canonically at construction, ``add(close, open)`` and
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from hashlib import sha256
 from typing import Callable, Final, Mapping, Sequence
 
 import numpy as np
@@ -126,6 +127,55 @@ class EvalResult:
             return (0, "", 0.0)
         index = int(np.argmax(self.degradation))
         return (index, self.node_ops[index], self.degradation[index])
+
+
+# --------------------------------------------------------------------------
+# semantic identity
+# --------------------------------------------------------------------------
+
+
+def value_hash(ranked: np.ndarray) -> str:
+    """Hash of a signal's cross-sectional ranks, not of its raw values.
+
+    Two expressions with the same hash are the same hypothesis, and the
+    registry should hold one row for them rather than two.
+
+    Spearman IC is invariant under any strictly monotone per-day transform, so
+    ``x``, ``rank(x)``, ``zscore(x)`` and ``log(x)`` all rank identically and
+    all produce the same IC, the same deciles and the same turnover. They are
+    one idea spelled four ways. Hashing raw values would record four trials;
+    hashing ranks records one.
+
+    That is the cheapest reduction in the multiple-testing burden available,
+    because N enters the Deflated Sharpe through ``sqrt(2 ln N)``: nothing
+    else removes trials at zero cost to the search.
+
+    ``sign(x)`` deliberately does not collide. It is monotone but not
+    strictly so, and coarsening a continuous signal to three levels changes
+    the ranks, the deciles and the IC. It is a different hypothesis and gets
+    its own row.
+
+    A strictly decreasing transform also does not collide, because it reverses
+    the ranks rather than preserving them. Whether ``x`` and its negation
+    should count as one hypothesis is a separate question, and collapsing them
+    would mean canonicalising the sign of every signal, which is a decision
+    about what a signal means rather than a hashing detail.
+
+    The caller passes ranks that it already needed. The screen ranks each
+    candidate once for the IC and reuses that array here, so the hash is free
+    rather than a second pass over the panel.
+    """
+    array = np.ascontiguousarray(ranked, dtype=DTYPE)
+    # NaN has many bit patterns and a division can produce the negative one,
+    # so the missingness pattern is canonicalised before hashing. Otherwise
+    # two identical signals could differ in the sign bit of a NaN.
+    missing = np.isnan(array)
+    if missing.any():
+        array = np.where(missing, np.float32(np.nan), array)
+    digest = sha256()
+    digest.update(f"{array.shape[0]}x{array.shape[1]}|".encode("utf-8"))
+    digest.update(array.tobytes())
+    return digest.hexdigest()[:32]
 
 
 # --------------------------------------------------------------------------
@@ -420,10 +470,10 @@ def _delta(node: Node, c: list[np.ndarray]) -> np.ndarray:
 
 
 def _rank(node: Node, c: list[np.ndarray]) -> np.ndarray:
-    return _rank_rows(c[0])
+    return rank_rows(c[0])
 
 
-def _rank_rows(x: np.ndarray) -> np.ndarray:
+def rank_rows(x: np.ndarray) -> np.ndarray:
     """Per-day centred rank, ties averaged, NaN excluded from the population.
 
     ``(position + 0.5) / n - 0.5`` over the day's non-NaN entries, so the row
