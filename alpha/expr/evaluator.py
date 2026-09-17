@@ -134,8 +134,33 @@ class EvalResult:
 # --------------------------------------------------------------------------
 
 
+def orientation(ranked: np.ndarray) -> float:
+    """+1 or -1, chosen so a signal and its negation share one orientation.
+
+    The rule is arbitrary and deterministic: scanning the panel in row-major
+    order, the first cell that is neither missing nor exactly at the median
+    rank must come out positive. A rank of exactly zero is a tie and carries
+    no direction, so it cannot anchor anything.
+
+    It is a function of the signal alone. Nothing about the forward returns
+    enters here, which is the property that matters: a canonicalisation that
+    consulted the labels would be fitting the sign to the data it is about to
+    be scored against, and the leak would be invisible because the sign is
+    exactly what the screen cannot check.
+
+    A signal with no non-tied cell at all is already degenerate and is left
+    alone.
+    """
+    flat = np.asarray(ranked).reshape(-1)
+    usable = np.isfinite(flat) & (flat != 0.0)
+    first = int(np.argmax(usable))
+    if not usable[first]:
+        return 1.0
+    return 1.0 if flat[first] > 0.0 else -1.0
+
+
 def value_hash(ranked: np.ndarray) -> str:
-    """Hash of a signal's cross-sectional ranks, not of its raw values.
+    """Hash of a signal's cross-sectional ranks, oriented, not of raw values.
 
     Two expressions with the same hash are the same hypothesis, and the
     registry should hold one row for them rather than two.
@@ -146,36 +171,87 @@ def value_hash(ranked: np.ndarray) -> str:
     one idea spelled four ways. Hashing raw values would record four trials;
     hashing ranks records one.
 
-    That is the cheapest reduction in the multiple-testing burden available,
-    because N enters the Deflated Sharpe through ``sqrt(2 ln N)``: nothing
-    else removes trials at zero cost to the search.
+    A signal and its negation collapse too, because the ranks are oriented
+    before hashing. The screen's verdict is ``|IC| > tau``, so the screen
+    cannot distinguish them: it has no way to prefer ``x`` over ``-x`` and no
+    business doing so. They are one draw from the null wearing two signs, and
+    counting both would double N for nothing. The direction is not discarded,
+    it moves to ``trials.ic_sign``, which is an attribute of the result rather
+    than part of its identity.
 
-    ``sign(x)`` deliberately does not collide. It is monotone but not
-    strictly so, and coarsening a continuous signal to three levels changes
-    the ranks, the deciles and the IC. It is a different hypothesis and gets
-    its own row.
+    Decoupling sign from identity is what makes a gauntlet test possible that
+    could not exist otherwise: whether a candidate's IC keeps its sign across
+    purged folds and across regimes. A candidate that flips sign between folds
+    had its sign fitted to noise, and it is dead however large its aggregate
+    ``|IC|``. That question is only askable once identity stops depending on
+    the answer.
 
-    A strictly decreasing transform also does not collide, because it reverses
-    the ranks rather than preserving them. Whether ``x`` and its negation
-    should count as one hypothesis is a separate question, and collapsing them
-    would mean canonicalising the sign of every signal, which is a decision
-    about what a signal means rather than a hashing detail.
+    ``sign(x)`` deliberately does not collide with ``x``. It is monotone but
+    not strictly so, and coarsening a continuous signal to three levels
+    changes the ranks, the deciles and the IC. It is a different hypothesis
+    and gets its own row.
 
     The caller passes ranks that it already needed. The screen ranks each
     candidate once for the IC and reuses that array here, so the hash is free
     rather than a second pass over the panel.
+
+    That N is halved by this is the point, and it is exact rather than
+    generous. See ``docs/REPRODUCIBILITY.md``: k spellings of one signal are k
+    names for one draw, and the maximum over them is that draw.
     """
-    array = np.ascontiguousarray(ranked, dtype=DTYPE)
-    # NaN has many bit patterns and a division can produce the negative one,
-    # so the missingness pattern is canonicalised before hashing. Otherwise
-    # two identical signals could differ in the sign bit of a NaN.
-    missing = np.isnan(array)
-    if missing.any():
-        array = np.where(missing, np.float32(np.nan), array)
+    positions, counts = _positions_from_rank(ranked)
+    if orientation(ranked) < 0.0:
+        # Reversing the order is exact integer arithmetic on the positions.
+        # Negating the float ranks is not: (p + 0.5) / n - 0.5 and its mirror
+        # are computed at different magnitudes, so they round differently in
+        # the last bit, and two spellings of one hypothesis would fail to
+        # collide for no reason but that. This is the float32 rounding hazard,
+        # and it bites as under-collapse rather than over-collapse.
+        np.subtract(2 * (counts[:, None] - 1), positions, out=positions)
+
+    missing = np.isnan(ranked)
+    positions[missing] = _MISSING_POSITION
+
     digest = sha256()
-    digest.update(f"{array.shape[0]}x{array.shape[1]}|".encode("utf-8"))
-    digest.update(array.tobytes())
+    digest.update(f"{ranked.shape[0]}x{ranked.shape[1]}|".encode("utf-8"))
+    digest.update(np.ascontiguousarray(counts, dtype=np.int32).tobytes())
+    digest.update(np.ascontiguousarray(positions, dtype=np.int32).tobytes())
     return digest.hexdigest()[:32]
+
+
+_MISSING_POSITION: Final[int] = -1
+"""Stands for a cell the signal does not define.
+
+A sentinel rather than a NaN, because the hash is over integers precisely to
+keep floating point out of it. It cannot collide with a real position, which
+is twice a non-negative half-integer and therefore never negative.
+"""
+
+
+def _positions_from_rank(ranked: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Recover exact ordinal positions from centred ranks.
+
+    A centred rank is ``(p + 0.5) / n - 0.5`` where ``p`` is a half-integer
+    position and ``n`` the day's non-NaN count, so ``p`` is recoverable by
+    inverting it and rounding. Twice ``p`` is then an exact integer, and the
+    hash is taken over integers.
+
+    Rounding is safe by a wide margin. The inversion is done in float64, and
+    even carrying float32's error through a multiply by three thousand leaves
+    the result within a thousandth of the correct integer, against the half a
+    unit that rounding can absorb.
+
+    Working in integers is what makes the hash robust in both directions. It
+    cannot fail to collide because two spellings rounded differently, and it
+    cannot over-collide because two distinct orderings differ by a whole unit
+    of position, not by an epsilon.
+    """
+    values = np.asarray(ranked, dtype=np.float64)
+    counts = np.count_nonzero(~np.isnan(values), axis=1).astype(np.float64)
+    safe = np.where(counts > 0.0, counts, 1.0)[:, None]
+    doubled = np.rint(2.0 * ((values + 0.5) * safe - 0.5))
+    doubled[np.isnan(values)] = 0.0
+    return doubled.astype(np.int64), counts.astype(np.int64)
 
 
 # --------------------------------------------------------------------------

@@ -307,3 +307,91 @@ def test_screening_is_reproducible(panel: Panel, registry: Registry) -> None:
         assert a.expr_hash == b.expr_hash
         assert a.verdict is b.verdict
         assert a.value_hash == b.value_hash
+
+
+# --------------------------------------------------------------------------
+# sign: an attribute of the result, not part of its identity
+# --------------------------------------------------------------------------
+
+
+def test_a_signal_and_its_negation_are_one_hypothesis(
+    panel: Panel, registry: Registry
+) -> None:
+    """The verdict is |IC| > tau, so the screen cannot tell them apart and has
+    no business preferring one. Counting both would double N for nothing."""
+    screen = make_screen(panel, registry)
+    forward = screen.screen(from_string("div(ts_delay(close, 20), ts_delay(close, 250))"))
+    reverse = screen.screen(from_string("div(ts_delay(close, 250), ts_delay(close, 20))"))
+
+    assert forward.value_hash == reverse.value_hash
+    assert forward.logged and not reverse.logged
+    assert registry.trial_count(screen.run_id) == 1
+    assert screen.report.semantic_collapses == 1
+
+
+def test_the_two_directions_score_opposite_signs(
+    panel: Panel, registry: Registry
+) -> None:
+    """Whichever arrives first gets the row, and its sign is recorded. Run
+    separately, the two spellings disagree on direction and agree on
+    magnitude."""
+    first = make_screen(panel, registry)
+    second = make_screen(panel, registry)
+
+    forward = first.screen(from_string("div(ts_delay(close, 20), ts_delay(close, 250))"))
+    reverse = second.screen(from_string("div(ts_delay(close, 250), ts_delay(close, 20))"))
+
+    assert forward.metrics is not None and reverse.metrics is not None
+    assert np.sign(forward.metrics.ic) == -np.sign(reverse.metrics.ic)
+    assert forward.metrics.ic == pytest.approx(-reverse.metrics.ic, rel=1e-3)
+
+
+def test_the_sign_reaches_the_ledger(panel: Panel, registry: Registry) -> None:
+    """The gauntlet asks whether it holds across folds, so it has to be
+    written down rather than recomputed from a signed IC that a later stage
+    may not have."""
+    screen = make_screen(panel, registry)
+    outcome = screen.screen(from_string("div(ts_delay(close, 20), ts_delay(close, 250))"))
+    row = registry._conn.execute("SELECT ic, ic_sign FROM trials").fetchone()
+    assert row["ic_sign"] in (1, -1)
+    assert row["ic_sign"] == (1 if row["ic"] > 0 else -1)
+    assert outcome.metrics is not None
+
+
+def test_a_signal_with_no_measurable_ic_records_no_sign(
+    panel: Panel, registry: Registry
+) -> None:
+    """A NULL says there was no direction to record, which is different from
+    recording a direction of zero."""
+    screen = make_screen(panel, registry)
+    screen.screen(from_string("sign(abs(close))"))
+    row = registry._conn.execute("SELECT ic, ic_sign FROM trials").fetchone()
+    assert row["ic"] is None and row["ic_sign"] is None
+
+
+def test_an_old_ledger_without_the_sign_column_is_refused(tmp_path) -> None:
+    """CREATE TABLE IF NOT EXISTS leaves an older table alone, so the check
+    covers trials as well as runs."""
+    import sqlite3
+
+    from alpha.registry.db import RegistryError
+
+    path = tmp_path / "old.sqlite"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE runs (id TEXT PRIMARY KEY, started_at TEXT NOT NULL,"
+        " git_sha TEXT, source_hash TEXT, config_json TEXT NOT NULL,"
+        " data_snapshot_id TEXT)"
+    )
+    connection.execute(
+        "CREATE TABLE trials (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " run_id TEXT NOT NULL, expr_hash TEXT NOT NULL, expr_str TEXT NOT NULL,"
+        " value_hash TEXT, created_at TEXT NOT NULL, stage_reached TEXT NOT NULL,"
+        " ic REAL, ic_ir REAL, turnover REAL, verdict TEXT NOT NULL,"
+        " kill_reason TEXT)"
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(RegistryError, match="ic_sign"):
+        Registry.open(path)

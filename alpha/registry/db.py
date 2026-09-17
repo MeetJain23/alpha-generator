@@ -155,8 +155,25 @@ class Trial:
     stage_reached: Stage
     verdict: Verdict
     value_hash: str | None = None
+    """Hash of the oriented cross-sectional ranks. This is the identity of the
+    hypothesis, and a signal and its negation share it."""
+
     ic: float | None = None
     ic_ir: float | None = None
+
+    ic_sign: int | None = None
+    """Which direction this spelling ran in, +1 or -1.
+
+    An attribute of the result, not part of the identity. The screen's verdict
+    is |IC| > tau, so the screen cannot tell x from -x and has no business
+    preferring one. Keeping the sign here rather than in the hash halves N and
+    makes a gauntlet test possible that could not exist otherwise: whether the
+    sign holds across purged folds and across regimes. A candidate whose sign
+    flips between folds fitted it to noise, and is dead whatever its aggregate
+    |IC|. That question is only askable once identity stops depending on the
+    answer.
+    """
+
     turnover: float | None = None
     kill_reason: KillReason | str | None = None
 
@@ -196,6 +213,7 @@ SCHEMA: tuple[str, ...] = (
         stage_reached TEXT NOT NULL,
         ic            REAL,
         ic_ir         REAL,
+        ic_sign       INTEGER,
         turnover      REAL,
         verdict       TEXT NOT NULL,
         kill_reason   TEXT
@@ -381,6 +399,24 @@ _REQUIRED_RUN_COLUMNS: frozenset[str] = frozenset(
     {"id", "started_at", "git_sha", "source_hash", "config_json", "data_snapshot_id"}
 )
 
+_REQUIRED_TRIAL_COLUMNS: frozenset[str] = frozenset(
+    {
+        "id",
+        "run_id",
+        "expr_hash",
+        "expr_str",
+        "value_hash",
+        "created_at",
+        "stage_reached",
+        "ic",
+        "ic_ir",
+        "ic_sign",
+        "turnover",
+        "verdict",
+        "kill_reason",
+    }
+)
+
 
 def _assert_schema(conn: sqlite3.Connection) -> None:
     """Refuse a ledger whose runs table predates a column this build writes.
@@ -390,14 +426,18 @@ def _assert_schema(conn: sqlite3.Connection) -> None:
     drop the provenance the new column carries. A ledger that cannot record
     how a result was produced is worse than one that refuses to open.
     """
-    columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
-    missing = _REQUIRED_RUN_COLUMNS - columns
-    if missing:
-        raise RegistryError(
-            f"this ledger's runs table is missing {sorted(missing)}. It was "
-            f"written by an older build. Start a new ledger rather than "
-            f"appending runs whose provenance cannot be recorded."
-        )
+    for table, required in (
+        ("runs", _REQUIRED_RUN_COLUMNS),
+        ("trials", _REQUIRED_TRIAL_COLUMNS),
+    ):
+        columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        missing = required - columns
+        if missing:
+            raise RegistryError(
+                f"this ledger's {table} table is missing {sorted(missing)}. It "
+                f"was written by an older build. Start a new ledger rather "
+                f"than appending rows whose provenance cannot be recorded."
+            )
 
 
 class Registry:
@@ -533,8 +573,8 @@ class Registry:
 
         cursor = self._conn.execute(
             "INSERT INTO trials (run_id, expr_hash, expr_str, value_hash,"
-            " created_at, stage_reached, ic, ic_ir, turnover, verdict, kill_reason)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " created_at, stage_reached, ic, ic_ir, ic_sign, turnover, verdict,"
+            " kill_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 trial.run_id,
                 trial.expr_hash,
@@ -544,6 +584,7 @@ class Registry:
                 trial.stage_reached.value,
                 trial.ic,
                 trial.ic_ir,
+                trial.ic_sign,
                 trial.turnover,
                 trial.verdict.value,
                 reason_text,

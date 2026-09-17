@@ -282,6 +282,7 @@ class Screen:
                 verdict=verdict,
                 ic=_finite(metrics.ic) if metrics else None,
                 ic_ir=_finite(metrics.ic_ir) if metrics else None,
+                ic_sign=_sign_of(metrics.ic) if metrics else None,
                 turnover=_finite(metrics.turnover) if metrics else None,
                 kill_reason=reason,
             )
@@ -294,6 +295,19 @@ class Screen:
 def _finite(value: float) -> float | None:
     """NaN is not a measurement, and a NULL column says so."""
     return float(value) if value is not None and np.isfinite(value) else None
+
+
+def _sign_of(value: float) -> int | None:
+    """Which direction this spelling ran in.
+
+    Recorded as an attribute because the hash is orientation-free: x and -x
+    are one hypothesis to a screen judging |IC|, so the sign cannot be part of
+    identity. It still has to be written down, because the gauntlet asks
+    whether it holds across folds.
+    """
+    if value is None or not np.isfinite(value) or value == 0.0:
+        return None
+    return 1 if value > 0.0 else -1
 
 
 DEFAULT_CONFIG: Final[ScreenConfig] = ScreenConfig()

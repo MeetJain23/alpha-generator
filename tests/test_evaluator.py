@@ -692,11 +692,110 @@ def test_a_different_window_is_a_different_hypothesis(panel: Panel) -> None:
     assert hash_of("delta(close, 20)", panel) != hash_of("delta(close, 60)", panel)
 
 
-def test_a_reversed_signal_does_not_collide(panel: Panel) -> None:
-    """A decreasing transform reverses the ranks rather than preserving them.
-    Whether a signal and its negation are one hypothesis is a separate
-    question about canonicalising sign."""
-    assert hash_of("sub(close, open)", panel) != hash_of("sub(open, close)", panel)
+def test_a_reversed_signal_is_the_same_hypothesis(panel: Panel) -> None:
+    """The screen judges |IC|, so it cannot tell x from -x and has no business
+    preferring one. They are one draw from the null wearing two signs, and
+    counting both would double N for nothing. The direction moves to
+    trials.ic_sign."""
+    assert hash_of("sub(close, open)", panel) == hash_of("sub(open, close)", panel)
+
+
+def test_orientation_is_decided_by_the_first_non_tied_cell() -> None:
+    """Arbitrary and deterministic, and a function of the signal alone. A rank
+    of exactly zero is a tie and carries no direction, so it cannot anchor
+    anything."""
+    from alpha.expr.evaluator import orientation
+
+    assert orientation(np.array([[0.0, 0.0, -0.25, 0.25]], dtype=DTYPE)) == -1.0
+    assert orientation(np.array([[0.0, 0.0, 0.25, -0.25]], dtype=DTYPE)) == 1.0
+    assert orientation(np.array([[NAN, -0.5, 0.5]], dtype=DTYPE)) == -1.0
+
+
+def test_an_all_tied_signal_has_no_orientation_to_fix() -> None:
+    from alpha.expr.evaluator import orientation
+
+    assert orientation(np.zeros((3, 4), dtype=DTYPE)) == 1.0
+    assert orientation(np.full((3, 4), NAN, dtype=DTYPE)) == 1.0
+
+
+def test_negating_ranks_does_not_change_the_hash(panel: Panel) -> None:
+    """Exercised directly, because the float path gets this wrong: the centred
+    rank and its mirror are computed at different magnitudes and round
+    differently in the last bit. The hash is over integer positions for that
+    reason."""
+    from alpha.expr.evaluator import rank_rows, value_hash
+
+    ranked = rank_rows(evaluate(from_string("ts_mean(close, 20)"), panel).values)
+    assert value_hash(ranked) == value_hash(-ranked)
+
+
+def test_the_hash_survives_a_float_perturbation_below_a_rank_step(panel: Panel) -> None:
+    """Two computations of one ordering must agree. A rank step is 1/n apart,
+    so a perturbation far below it cannot change the ordering and must not
+    change the hash."""
+    from alpha.expr.evaluator import rank_rows, value_hash
+
+    ranked = rank_rows(evaluate(from_string("ts_mean(close, 20)"), panel).values)
+    nudged = (ranked.astype(np.float64) * (1.0 + 1e-9)).astype(DTYPE)
+    assert value_hash(ranked) == value_hash(nudged)
+
+
+def _mean_rank_correlation(left: np.ndarray, right: np.ndarray) -> float:
+    """Mean per-day Pearson correlation of two already-ranked signals."""
+    usable = ~np.isnan(left) & ~np.isnan(right)
+    counts = np.count_nonzero(usable, axis=1)
+    a = np.where(usable, left, 0.0).astype(np.float64)
+    b = np.where(usable, right, 0.0).astype(np.float64)
+    n = np.maximum(counts, 1)
+    a -= np.where(usable, (a.sum(axis=1) / n)[:, None], 0.0)
+    b -= np.where(usable, (b.sum(axis=1) / n)[:, None], 0.0)
+    cov = np.einsum("ij,ij->i", a, b)
+    denom = np.sqrt(np.einsum("ij,ij->i", a, a) * np.einsum("ij,ij->i", b, b))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        per_day = np.where((counts >= 20) & (denom > 0), cov / denom, np.nan)
+    scored = per_day[~np.isnan(per_day)]
+    return float(np.mean(scored)) if scored.size else float("nan")
+
+
+def test_no_two_unrelated_signals_share_a_hash(panel: Panel) -> None:
+    """The dangerous direction.
+
+    Under-collapsing costs a little power. Over-collapsing silently drops a
+    draw from the null: two genuinely different hypotheses would be recorded
+    as one, N would understate the search, and the deflation would certify a
+    result it exists to reject. Float rounding before hashing is where that
+    would come from, which is why the hash is over integer positions.
+
+    So: across a large sample, any two signals sharing a hash must be the same
+    signal up to sign, not merely similar.
+    """
+    from alpha.expr.evaluator import rank_rows, value_hash
+    from alpha.screen.metrics import dispersion
+
+    rng = np.random.default_rng(20260918)
+    groups: dict[str, list[tuple[str, np.ndarray]]] = {}
+    for _ in range(400):
+        tree = random_tree(rng, 4)
+        result = evaluate(tree, panel)
+        ranked = rank_rows(result.values)
+        ranked[: result.warmup] = NAN
+        # A degenerate signal carries no ordering, so two of them colliding is
+        # correct and their correlation is undefined. The screen kills these
+        # before the hash is ever compared.
+        if dispersion(ranked) < 0.01:
+            continue
+        groups.setdefault(value_hash(ranked), []).append((str(tree), ranked))
+
+    collided = {h: members for h, members in groups.items() if len(members) > 1}
+    for members in collided.values():
+        _, base = members[0]
+        for name, other in members[1:]:
+            rho = abs(_mean_rank_correlation(base, other))
+            assert rho > 0.99, (
+                f"{name} shares a hash with {members[0][0]} but their rank "
+                f"correlation is only {rho:.4f}"
+            )
+    assert groups, "no signals survived the dispersion filter"
 
 
 def test_the_hash_is_stable_across_calls(panel: Panel) -> None:

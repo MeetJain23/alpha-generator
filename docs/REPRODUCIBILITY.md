@@ -142,11 +142,52 @@ A candidate whose ranked values match one already tested is the same
 hypothesis wearing a different spelling. Rank IC, decile membership and
 turnover are all invariant under a strictly monotone per-day transform, so
 `x`, `rank(x)`, `zscore(x)` and `log(x)` produce identical numbers by
-construction. Counting four is not conservative, it is wrong: three of them
-had no independent chance of succeeding, and N enters the deflation through
-`sqrt(2 ln N)`, so inflating it discards real results to guard against a risk
-that was never taken. `trials.value_hash` holds the hash of the ranked signal
-and is what makes the collapse detectable.
+construction.
+
+**N counts distinct hypotheses tested, not expressions enumerated.** The
+collapse is exact, not a conservative approximation. *k* spellings of one
+signal are *k* names for a single draw from the null, and the maximum over
+them is that draw: not `sigma * sqrt(2 ln k)`, which is what the maximum of
+*k* independent draws would be. Recording *k* rows would tell the deflation
+the search took *k* chances when it took one.
+
+**The risk therefore runs the other way.** Undercounting is not the hazard
+here; over-collapsing is. A hash collision between two genuinely different
+hypotheses silently drops a draw, N understates the search, and the deflation
+certifies a result it exists to reject. Nothing in the output would look
+wrong.
+
+Float rounding before hashing is where that would come from, so
+`trials.value_hash` is taken over exact integer ordinal positions rather than
+over float ranks. Two distinct orderings differ by a whole unit of position,
+not by an epsilon, so a rounding difference cannot manufacture a collision.
+`tests/test_evaluator.py` asserts it directly: across four hundred random
+trees, any two signals sharing a hash have a rank correlation above 0.99.
+
+### Sign is an attribute, not an identity
+
+A signal and its negation share a hash. The ranks are oriented before hashing,
+by an arbitrary deterministic rule: scanning the panel in row-major order, the
+first cell that is neither missing nor exactly at the median rank is made
+positive.
+
+The screen's verdict is `|IC| > tau`. It has no way to prefer `x` over `-x`
+and no business doing so, and the two are one draw from the null wearing two
+signs. Counting both would double N for nothing. This halves the reported N,
+correctly.
+
+The orientation rule is a function of the signal alone. Nothing about the
+forward returns enters it, which is the property that matters: a
+canonicalisation that consulted the labels would be fitting the sign to the
+data it is about to be scored against, and that leak would be invisible
+precisely because the sign is what the screen cannot check.
+
+The direction is not discarded. It moves to `trials.ic_sign`, and decoupling
+it from identity is what makes a gauntlet test possible that could not exist
+otherwise: whether a candidate's IC keeps its sign across purged folds and
+across regimes. A candidate that flips sign between folds fitted its sign to
+noise and is dead however large its aggregate `|IC|`. That question is only
+askable once identity has stopped depending on the answer.
 
 `sign(x)` deliberately does not collapse onto `x`. It is monotone but not
 strictly, and coarsening a continuous signal to three levels changes the
