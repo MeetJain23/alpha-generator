@@ -17,12 +17,14 @@ from alpha.expr import grammar
 from alpha.registry.db import (
     KillReason,
     Registry,
+    RegistryError,
     Stage,
     Trial,
     Verdict,
     engine_config,
     grammar_fingerprint,
     open_registry,
+    source_hash,
 )
 
 
@@ -349,3 +351,87 @@ def test_triggers_survive_a_reopen(tmp_path) -> None:
     with open_registry(path) as registry:
         with pytest.raises(sqlite3.IntegrityError, match="append-only"):
             registry._conn.execute("DELETE FROM trials")
+
+
+# --------------------------------------------------------------------------
+# source_hash: verification, where git_sha is only retrieval
+# --------------------------------------------------------------------------
+
+
+def test_a_run_records_both_the_sha_and_the_source_hash(reg: Registry) -> None:
+    run = reg.start_run()
+    stored = reg.run(run.id)
+    assert stored.source_hash == source_hash()
+    assert len(stored.source_hash) == 64
+
+
+def test_the_source_hash_is_stable_across_calls() -> None:
+    assert source_hash() == source_hash()
+
+
+def test_the_source_hash_moves_when_a_source_file_changes(tmp_path) -> None:
+    """Otherwise it could not tell you whether the code you found is the code
+    that ran."""
+    import shutil
+    from pathlib import Path
+
+    import alpha
+
+    package = Path(alpha.__file__).resolve().parent
+    copy = tmp_path / "alpha"
+    shutil.copytree(package, copy)
+    before = source_hash(copy)
+
+    target = copy / "expr" / "grammar.py"
+    target.write_text(target.read_text(encoding="utf-8") + "\n# changed\n", encoding="utf-8")
+    assert source_hash(copy) != before
+
+
+def test_the_source_hash_moves_when_code_moves_between_files(tmp_path) -> None:
+    """The path is mixed in alongside the bytes, so a rename is a change."""
+    import shutil
+    from pathlib import Path
+
+    import alpha
+
+    package = Path(alpha.__file__).resolve().parent
+    copy = tmp_path / "alpha"
+    shutil.copytree(package, copy)
+    before = source_hash(copy)
+
+    (copy / "expr" / "kernels.py").rename(copy / "expr" / "kernels_renamed.py")
+    assert source_hash(copy) != before
+
+
+def test_the_source_hash_ignores_bytecode_caches(tmp_path) -> None:
+    """A hash that moved when Python cached a module would be useless."""
+    import shutil
+    from pathlib import Path
+
+    import alpha
+
+    package = Path(alpha.__file__).resolve().parent
+    copy = tmp_path / "alpha"
+    shutil.copytree(package, copy)
+    before = source_hash(copy)
+
+    cache = copy / "__pycache__"
+    cache.mkdir(exist_ok=True)
+    (cache / "junk.py").write_text("# not source\n", encoding="utf-8")
+    assert source_hash(copy) == before
+
+
+def test_a_ledger_missing_the_provenance_column_is_refused(tmp_path) -> None:
+    """CREATE TABLE IF NOT EXISTS leaves an old table alone, so an old ledger
+    would otherwise keep accepting runs and drop the new provenance."""
+    path = tmp_path / "old.sqlite"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE runs (id TEXT PRIMARY KEY, started_at TEXT NOT NULL,"
+        " git_sha TEXT, config_json TEXT NOT NULL, data_snapshot_id TEXT)"
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(RegistryError, match="source_hash"):
+        Registry.open(path)

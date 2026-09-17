@@ -45,6 +45,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
+import alpha
 from alpha.expr import grammar
 from alpha.logging_config import get_logger
 
@@ -54,6 +55,10 @@ _log = get_logger(__name__)
 # --------------------------------------------------------------------------
 # vocabulary
 # --------------------------------------------------------------------------
+
+
+class RegistryError(RuntimeError):
+    """The ledger cannot be used as it stands."""
 
 
 class Stage(Enum):
@@ -123,6 +128,7 @@ class RunRecord:
     id: str
     started_at: str
     git_sha: str | None
+    source_hash: str
     config: Mapping[str, Any]
     data_snapshot_id: str | None
 
@@ -167,6 +173,7 @@ SCHEMA: tuple[str, ...] = (
         id               TEXT PRIMARY KEY,
         started_at       TEXT NOT NULL,
         git_sha          TEXT,
+        source_hash      TEXT,
         config_json      TEXT NOT NULL,
         data_snapshot_id TEXT
     )
@@ -268,6 +275,35 @@ def git_sha(repo: Path | None = None) -> str | None:
     return f"{sha}-dirty" if dirty else sha
 
 
+def source_hash(package: Path | None = None) -> str:
+    """Content hash of the library source, independent of version control.
+
+    sha256 over every ``alpha/**/*.py`` in sorted order, with each file's
+    path mixed in alongside its bytes so that moving code between modules
+    changes the hash even when the bytes are unchanged.
+
+    ``git_sha`` and this serve different purposes and neither replaces the
+    other. The SHA is for retrieval: it says where to find the code. The
+    source hash is for verification: it says whether the code you found is the
+    code that ran. If a SHA ever orphans, because a branch was rewritten or a
+    repository replaced, the SHA becomes a dangling pointer while a matching
+    source hash still proves the source was byte-identical. Recording both
+    costs one column and removes a dependency on the history staying intact.
+
+    The package directory is located from the installed package rather than
+    from the working directory, so the hash describes the code that is running
+    and not whatever happens to sit below the shell's cwd.
+    """
+    root = package or Path(alpha.__file__).resolve().parent
+    digest = sha256()
+    for path in sorted(root.rglob("*.py"), key=lambda p: p.relative_to(root).as_posix()):
+        if "__pycache__" in path.parts:
+            continue
+        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
 def grammar_fingerprint() -> str:
     """A hash of the operator registry as it currently stands.
 
@@ -334,6 +370,29 @@ def _new_run_id() -> str:
 _RESERVED_CONFIG_KEYS: frozenset[str] = frozenset(engine_config())
 
 
+_REQUIRED_RUN_COLUMNS: frozenset[str] = frozenset(
+    {"id", "started_at", "git_sha", "source_hash", "config_json", "data_snapshot_id"}
+)
+
+
+def _assert_schema(conn: sqlite3.Connection) -> None:
+    """Refuse a ledger whose runs table predates a column this build writes.
+
+    CREATE TABLE IF NOT EXISTS leaves an older table exactly as it was, so
+    without this check an old ledger would keep accepting runs and silently
+    drop the provenance the new column carries. A ledger that cannot record
+    how a result was produced is worse than one that refuses to open.
+    """
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
+    missing = _REQUIRED_RUN_COLUMNS - columns
+    if missing:
+        raise RegistryError(
+            f"this ledger's runs table is missing {sorted(missing)}. It was "
+            f"written by an older build. Start a new ledger rather than "
+            f"appending runs whose provenance cannot be recorded."
+        )
+
+
 class Registry:
     """Handle on one ledger database.
 
@@ -365,6 +424,7 @@ class Registry:
         for statement in SCHEMA:
             conn.execute(statement)
         conn.commit()
+        _assert_schema(conn)
         return cls(conn)
 
     def close(self) -> None:
@@ -399,16 +459,18 @@ class Registry:
             id=_new_run_id(),
             started_at=_now(),
             git_sha=git_sha(repo),
+            source_hash=source_hash(),
             config=merged,
             data_snapshot_id=data_snapshot_id,
         )
         self._conn.execute(
-            "INSERT INTO runs (id, started_at, git_sha, config_json, data_snapshot_id)"
-            " VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO runs (id, started_at, git_sha, source_hash, config_json,"
+            " data_snapshot_id) VALUES (?, ?, ?, ?, ?, ?)",
             (
                 record.id,
                 record.started_at,
                 record.git_sha,
+                record.source_hash,
                 json.dumps(merged, sort_keys=True),
                 record.data_snapshot_id,
             ),
@@ -419,6 +481,7 @@ class Registry:
             extra={
                 "run_id": record.id,
                 "git_sha": record.git_sha,
+                "source_hash": record.source_hash,
                 "data_snapshot_id": record.data_snapshot_id,
                 "grammar_fingerprint": merged["grammar_fingerprint"],
             },
@@ -435,6 +498,7 @@ class Registry:
             id=row["id"],
             started_at=row["started_at"],
             git_sha=row["git_sha"],
+            source_hash=row["source_hash"],
             config=json.loads(row["config_json"]),
             data_snapshot_id=row["data_snapshot_id"],
         )
