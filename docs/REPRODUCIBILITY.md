@@ -121,8 +121,7 @@ a comment asking future code not to mutate a row is worth nothing and a trigger
 that aborts the transaction is worth something.
 
 **Invariant:** `trial_count(run_id)` only ever grows, and it counts every
-candidate evaluated, including the ones killed instantly, the duplicates and
-the evaluation errors.
+distinct hypothesis that was tested against the data.
 
 **What breaks otherwise:** that count is the N in the Deflated Sharpe Ratio. N
 is how the deflation knows how many hypotheses were tested, and therefore how
@@ -130,6 +129,39 @@ high a Sharpe has to be before it is more than the best of many coin flips. A
 mutable or deletable row lets N undercount the real multiple-testing burden,
 and an undercounted N makes the deflation optimistic. The deflation would then
 be doing the opposite of its job: certifying results it exists to reject.
+
+### What counts as a hypothesis
+
+Three things do not earn a row, and each omission is deliberate.
+
+A candidate rejected before evaluation never looked at the data. A structural
+duplicate is the same tree that was already tried, and it cannot have been
+lucky a second time without being evaluated a second time.
+
+A candidate whose ranked values match one already tested is the same
+hypothesis wearing a different spelling. Rank IC, decile membership and
+turnover are all invariant under a strictly monotone per-day transform, so
+`x`, `rank(x)`, `zscore(x)` and `log(x)` produce identical numbers by
+construction. Counting four is not conservative, it is wrong: three of them
+had no independent chance of succeeding, and N enters the deflation through
+`sqrt(2 ln N)`, so inflating it discards real results to guard against a risk
+that was never taken. `trials.value_hash` holds the hash of the ranked signal
+and is what makes the collapse detectable.
+
+`sign(x)` deliberately does not collapse onto `x`. It is monotone but not
+strictly, and coarsening a continuous signal to three levels changes the
+ranks, the deciles and the IC. It is a different hypothesis and gets its own
+row.
+
+Everything that reached evaluation with a hypothesis not already tested earns
+a row, whether it passed or died. A candidate killed on IC, on turnover, on
+coverage or by an evaluation error all looked at the data, and all of them
+had their chance.
+
+The collapses are not lost. The screen logs each one and reports the counts,
+so the audit trail shows what the search did even where the ledger
+deliberately does not grow. What the ledger holds is the set of hypotheses,
+and N is the size of that set.
 
 ### Git history is append-only too
 
@@ -167,7 +199,8 @@ Before trusting a logged result:
 4. `runs.config_json` matches the configuration you are about to use, including
    `grammar_fingerprint` and the seed.
 5. `trial_count(run_id)` is the N you deflate by. Not the number of survivors,
-   not the number that reached the gauntlet. Every candidate evaluated.
+   not the number that reached the gauntlet, and not the number of candidates
+   the generator emitted. Every distinct hypothesis that was tested.
 
 If any of the five fails, the result is not reproducible and should be treated
 as an anecdote rather than a measurement.

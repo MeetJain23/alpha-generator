@@ -553,12 +553,19 @@ class Registry:
         return int(cursor.lastrowid)
 
     def trial_count(self, run_id: str) -> int:
-        """Every candidate evaluated in this run.
+        """Rows in this run, which is the N for the Deflated Sharpe Ratio.
 
-        This is the N for the Deflated Sharpe Ratio. It counts instantly
-        killed candidates, duplicates and evaluation errors, because all of
-        them were looks at the data. Any filtering here would understate the
-        multiple-testing burden and flatter every surviving result.
+        It counts every hypothesis that was tested against the data, including
+        the ones killed on their first metric and the ones whose evaluation
+        raised, because all of those looked at the data and all of them had
+        their chance.
+
+        What is not here never earned a row: a candidate rejected before
+        evaluation never looked, and a candidate whose ranked values matched
+        one already tested was the same hypothesis spelled differently. The
+        screen decides that, not this method, and ``docs/REPRODUCIBILITY.md``
+        states the rule. No filtering happens here, so this number cannot
+        drift from what was written.
         """
         row = self._conn.execute(
             "SELECT COUNT(*) AS n FROM trials WHERE run_id = ?", (run_id,)
