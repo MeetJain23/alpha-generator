@@ -83,6 +83,17 @@ class EvalResult:
     """Times a rolling variance came out negative and was clamped to zero.
     In float64 this should be zero; anything else is worth investigating."""
 
+    non_finite: int = 0
+    """Cells that overflowed to an infinity and were replaced with NaN.
+
+    float32 tops out around 3.4e38, and a nested product reaches it on
+    plausible fields. An infinity would survive every downstream operator and
+    surface only as a nonsense IC, so it is converted at the root, where the
+    cost is one pass per tree rather than one per node. Converted, not
+    ignored: the count is reported, because a NaN that came from an overflow
+    means something different from a NaN that means there was nothing to
+    trade, and the difference should not be invisible."""
+
     fill: Mapping[int, np.ndarray] = field(default_factory=dict)
     """Per-cell window fill by node index, only when ``debug_fill=True``."""
 
@@ -157,6 +168,13 @@ def _evaluate_one(
             extra={"expr": str(tree), "clamped_cells": clamped},
         )
 
+    values, non_finite = _finite_only(values)
+    if non_finite:
+        _log.warning(
+            "overflow to infinity replaced with NaN",
+            extra={"expr": str(tree), "cells": non_finite},
+        )
+
     _assert_warmup_is_empty(tree, values)
     return EvalResult(
         values=values,
@@ -164,8 +182,26 @@ def _evaluate_one(
         degradation=degradation,
         node_ops=tuple(node.op for node in nodes),
         clamped=clamped,
+        non_finite=non_finite,
         fill=fill,
     )
+
+
+def _finite_only(values: np.ndarray) -> tuple[np.ndarray, int]:
+    """Replace infinities with NaN at the root, and say how many there were.
+
+    Done once per tree rather than once per node. Guarding every operator
+    would cost a pass over 30MB at every node in a design that is already
+    memory-bandwidth-bound, and an infinity that appears mid-tree either
+    survives to the root or turns into a NaN on the way, so the root catches
+    what matters.
+    """
+    infinite = np.isinf(values)
+    count = int(np.count_nonzero(infinite))
+    if count:
+        values = values.copy()
+        values[infinite] = np.nan
+    return values, count
 
 
 def _assert_warmup_is_empty(tree: Node, values: np.ndarray) -> None:
@@ -291,15 +327,24 @@ _KERNELS: Final[Mapping[str, Callable]] = {
 
 
 def _add(node: Node, c: list[np.ndarray]) -> np.ndarray:
-    return (c[0] + c[1]).astype(DTYPE, copy=False)
+    # Overflow is handled once at the root, where an infinity becomes a
+    # counted NaN, so it does not need to warn at every node on the way.
+    with np.errstate(over="ignore", invalid="ignore"):
+        return (c[0] + c[1]).astype(DTYPE, copy=False)
 
 
 def _sub(node: Node, c: list[np.ndarray]) -> np.ndarray:
-    return (c[0] - c[1]).astype(DTYPE, copy=False)
+    # Overflow is handled once at the root, where an infinity becomes a
+    # counted NaN, so it does not need to warn at every node on the way.
+    with np.errstate(over="ignore", invalid="ignore"):
+        return (c[0] - c[1]).astype(DTYPE, copy=False)
 
 
 def _mul(node: Node, c: list[np.ndarray]) -> np.ndarray:
-    return (c[0] * c[1]).astype(DTYPE, copy=False)
+    # Overflow is handled once at the root, where an infinity becomes a
+    # counted NaN, so it does not need to warn at every node on the way.
+    with np.errstate(over="ignore", invalid="ignore"):
+        return (c[0] * c[1]).astype(DTYPE, copy=False)
 
 
 def _div(node: Node, c: list[np.ndarray]) -> np.ndarray:
