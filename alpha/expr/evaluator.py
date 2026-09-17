@@ -53,7 +53,7 @@ import numpy as np
 from alpha.data.types import DTYPE, Panel
 from alpha.expr import grammar, kernels
 from alpha.expr.ast import Node
-from alpha.expr.grammar import WindowPolicy
+from alpha.expr.grammar import MIN_GROUP_SIZE, WindowPolicy
 from alpha.logging_config import get_logger
 
 _log = get_logger(__name__)
@@ -88,11 +88,25 @@ class EvalResult:
 
     float32 tops out around 3.4e38, and a nested product reaches it on
     plausible fields. An infinity would survive every downstream operator and
-    surface only as a nonsense IC, so it is converted at the root, where the
-    cost is one pass per tree rather than one per node. Converted, not
-    ignored: the count is reported, because a NaN that came from an overflow
-    means something different from a NaN that means there was nothing to
-    trade, and the difference should not be invisible."""
+    surface only as a nonsense IC, so it is converted, and counted rather than
+    ignored: a NaN from an overflow means something different from a NaN
+    meaning there was nothing to trade.
+
+    The conversion happens at the root, once per tree, and that placement has
+    a consequence worth stating rather than leaving implied. An infinity
+    formed inside a windowed operator is read by that operator's window for
+    the next d rows, so one overflowed cell contaminates up to d output cells
+    before the root ever sees it, and the root then converts all of them. The
+    count therefore measures contaminated output, not the number of
+    overflows.
+
+    That is accepted rather than overlooked. Overflow needs a product of two
+    values near 1e19 on fields that do not reach it, the inflated NaN count
+    kills the candidate on coverage regardless, and guarding every node would
+    cost a pass over 30MB per node in a design that is already
+    memory-bandwidth-bound. If the count ever fires routinely, the right
+    answer is a guard inside the operators that can overflow, not a wider net
+    at the root."""
 
     fill: Mapping[int, np.ndarray] = field(default_factory=dict)
     """Per-cell window fill by node index, only when ``debug_fill=True``."""
@@ -523,7 +537,9 @@ def _demean_by(node: Node, c: list[np.ndarray]) -> np.ndarray:
     totals = np.bincount(keys, weights=x[valid].astype(np.float64), minlength=size)
     counts = np.bincount(keys, minlength=size)
     with np.errstate(invalid="ignore"):
-        means = np.where(counts > 0, totals / np.maximum(counts, 1), np.nan)
+        means = np.where(
+            counts >= MIN_GROUP_SIZE, totals / np.maximum(counts, 1), np.nan
+        )
     out[valid] = (x[valid] - means[keys]).astype(DTYPE, copy=False)
     return out
 
@@ -577,7 +593,7 @@ def _rank_within(node: Node, c: list[np.ndarray]) -> np.ndarray:
     within = 0.5 * (tie_start + tie_end) - block_start
     with np.errstate(invalid="ignore", divide="ignore"):
         ranked = np.where(
-            block_size >= 2.0, (within + 0.5) / block_size - 0.5, np.nan
+            block_size >= MIN_GROUP_SIZE, (within + 0.5) / block_size - 0.5, np.nan
         )
 
     scattered = np.empty(n, dtype=np.float64)

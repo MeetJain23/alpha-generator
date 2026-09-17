@@ -331,62 +331,99 @@ def test_zscore_of_an_empty_day_is_nan_without_warning() -> None:
 
 
 def test_demean_by_removes_the_group_mean() -> None:
+    #   group 0: [1, 2, 3, 4, 5] mean 3 -> [-2, -1, 0, 1, 2]
+    #   group 1: [10, 20, 30, 40, 50] mean 30 -> [-20, -10, 0, 10, 20]
     panel = make_panel(
-        close=[[1.0, 3.0, 10.0, 20.0]],
-        sector=[[0.0, 0.0, 1.0, 1.0]],
+        close=[[1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0]],
+        sector=[[0.0] * 5 + [1.0] * 5],
     )
     got = evaluate(from_string("demean_by(close, sector)"), panel).values[0]
-    assert_close(got, [-1.0, 1.0, -5.0, 5.0])
+    assert_close(got, [-2, -1, 0, 1, 2, -20, -10, 0, 10, 20])
 
 
 def test_a_null_group_label_gives_nan_with_no_residual_bucket() -> None:
     """Pooling the unclassified would demean a company against an arbitrary
     set that shares nothing except that the vendor failed to label them."""
     panel = make_panel(
-        close=[[1.0, 3.0, 10.0, 20.0]],
-        sector=[[0.0, 0.0, NAN, NAN]],
+        close=[[1.0, 2.0, 3.0, 4.0, 5.0, 99.0, 98.0]],
+        sector=[[0.0] * 5 + [NAN, NAN]],
     )
     got = evaluate(from_string("demean_by(close, sector)"), panel).values[0]
-    assert_close(got[:2], [-1.0, 1.0])
-    assert np.isnan(got[2]) and np.isnan(got[3])
+    assert_close(got[:5], [-2, -1, 0, 1, 2])
+    assert np.isnan(got[5]) and np.isnan(got[6])
+
+
+def test_a_group_below_the_floor_gives_nan() -> None:
+    """Demeaning two names returns half their difference and nothing else,
+    which is an arithmetic identity rather than a measurement."""
+    assert grammar.MIN_GROUP_SIZE == 5
+    panel = make_panel(
+        close=[[1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0]],
+        sector=[[0.0] * 5 + [1.0, 1.0]],
+    )
+    got = evaluate(from_string("demean_by(close, sector)"), panel).values[0]
+    assert_close(got[:5], [-2, -1, 0, 1, 2])
+    assert np.isnan(got[5]) and np.isnan(got[6])
 
 
 def test_rank_within_ranks_inside_the_group() -> None:
+    #   five names per group, so positions 0..4 -> (p + 0.5) / 5 - 0.5
+    expected = [-0.4, -0.2, 0.0, 0.2, 0.4]
     panel = make_panel(
-        close=[[1.0, 3.0, 10.0, 20.0]],
-        sector=[[0.0, 0.0, 1.0, 1.0]],
+        close=[[1.0, 2.0, 3.0, 4.0, 5.0, 50.0, 40.0, 30.0, 20.0, 10.0]],
+        sector=[[0.0] * 5 + [1.0] * 5],
     )
     got = evaluate(from_string("rank_within(close, sector)"), panel).values[0]
-    assert_close(got, [-0.25, 0.25, -0.25, 0.25])
+    assert_close(got[:5], expected)
+    assert_close(got[5:], expected[::-1])
 
 
-def test_rank_within_a_group_of_one_is_nan() -> None:
-    """A rank with no population to rank against carries no information."""
+def test_rank_within_a_group_below_the_floor_is_nan() -> None:
+    """A centred rank over two names is always plus or minus 0.25 whatever the
+    values are, and a constant is worse than noise downstream."""
     panel = make_panel(
-        close=[[1.0, 3.0, 10.0]],
-        sector=[[0.0, 0.0, 1.0]],
+        close=[[1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0]],
+        sector=[[0.0] * 5 + [1.0, 1.0]],
     )
     got = evaluate(from_string("rank_within(close, sector)"), panel).values[0]
-    assert_close(got[:2], [-0.25, 0.25])
-    assert np.isnan(got[2])
+    assert np.isnan(got[5]) and np.isnan(got[6])
+    assert np.isfinite(got[:5]).all()
 
 
 def test_rank_within_averages_ties() -> None:
+    #   [5, 5, 5, 1, 9]: the three fives share positions 1, 2, 3 -> average 2
     panel = make_panel(
-        close=[[5.0, 5.0, 1.0, 9.0]],
-        sector=[[0.0, 0.0, 1.0, 1.0]],
+        close=[[5.0, 5.0, 5.0, 1.0, 9.0]],
+        sector=[[0.0] * 5],
     )
     got = evaluate(from_string("rank_within(close, sector)"), panel).values[0]
-    assert got[0] == pytest.approx(got[1]) == pytest.approx(0.0)
+    assert got[0] == pytest.approx(got[1]) == pytest.approx(got[2])
+    assert got[0] == pytest.approx((2.0 + 0.5) / 5.0 - 0.5)
+    assert got[3] < got[0] < got[4]
 
 
 def test_rank_within_handles_a_null_label() -> None:
     panel = make_panel(
-        close=[[1.0, 3.0, 10.0]],
-        sector=[[0.0, 0.0, NAN]],
+        close=[[1.0, 2.0, 3.0, 4.0, 5.0, 10.0]],
+        sector=[[0.0] * 5 + [NAN]],
     )
     got = evaluate(from_string("rank_within(close, sector)"), panel).values[0]
-    assert np.isnan(got[2])
+    assert np.isnan(got[5])
+    assert np.isfinite(got[:5]).all()
+
+
+def test_the_group_floor_kills_the_variance_clamp_at_source() -> None:
+    """The clamp used to fire constantly because a two-member sector produced
+    the same rank every day, giving a constant series whose true variance is
+    zero."""
+    rng = np.random.default_rng(2)
+    values = rng.normal(size=(60, 7)).astype(np.float32)
+    sectors = np.tile(np.array([0, 0, 0, 0, 0, 1, 1], dtype=np.float32), (60, 1))
+    panel = make_panel(close=values.tolist(), sector=sectors.tolist())
+    result = evaluate(from_string("ts_std(rank_within(close, sector), 10)"), panel)
+    assert result.clamped == 0
+    assert np.isnan(result.values[:, 5]).all()
+    assert np.isnan(result.values[:, 6]).all()
 
 
 # --------------------------------------------------------------------------

@@ -41,6 +41,30 @@ Two rules cover every windowed operator:
 Getting this off by one is the single largest look-ahead risk in the system.
 It is declared once, here, and tested directly.
 
+Why warmup is not relaxed to match min_periods
+----------------------------------------------
+``min_periods`` tolerates a window holding 80 per cent of its observations, so
+it is tempting to let warmup end at ``ceil(0.8 * d)`` too and recover a fifth
+of the history. That would be wrong, because the two answer different
+questions.
+
+``min_periods`` is about gaps in the middle of a window: the instrument
+existed, it simply did not trade on some of those days, and the surrounding
+observations still describe it. warmup is about absence of history at the
+start: there is no earlier data because there was no earlier instrument.
+
+Relaxing warmup would let a company that listed mid-panel start emitting once
+80 per cent of its first window had accumulated, while a company listed
+throughout waits for a full one. Every windowed operator would then carry a
+listing-age term, recently listed names would differ systematically from
+mature ones for a reason that has nothing to do with their returns, and the
+search would find that difference and call it a factor. It is the same shape
+as the decay_linear renormalisation bug, arriving through the time axis
+instead of the weight vector.
+
+The cost of the conservative choice is ``ceil(0.2 * d)`` rows at the start of
+each instrument's life, which is a few weeks even at the longest window.
+
 Normalisation
 -------------
 Cross-sectional ranks are centred on zero:
@@ -252,6 +276,28 @@ values are not comparable. Layer 0 records it in ``runs.config_json``
 alongside the git SHA.
 """
 
+MIN_GROUP_SIZE: Final[int] = 5
+"""Instruments a group must hold before a within-group statistic means anything.
+
+demean_by and rank_within give NaN for any group smaller than this on a given
+day. It is the cross-sectional counterpart of ``min_periods``, and it exists
+for the same reason: a statistic computed from one or two observations is not
+a weak measurement, it is an arithmetic identity wearing the costume of one.
+
+A centred rank over two names is always exactly plus or minus 0.25 whatever
+the values are. Over one name it is exactly zero. Demeaning a group of two
+returns plus or minus half their difference. None of those carry information
+about the instruments, and all of them are perfectly stable through time,
+which is worse than noise: a constant series has zero variance, so anything
+downstream measuring dispersion sees a degenerate input and the search sees a
+signal that never changes.
+
+Five is comfortably below any real GICS sector on a US panel, so on real data
+this never binds. It binds on synthetic panels and on thin universes, which is
+exactly where a silent arithmetic identity would otherwise be mistaken for a
+result.
+"""
+
 MAX_ARITY: Final[int] = 2
 
 
@@ -298,6 +344,22 @@ class OpSpec:
     warmup_rule: WarmupRule = WarmupRule.NONE
     window_policy: WindowPolicy = WindowPolicy.NONE
     commutative: bool = False
+    elidable_at_root: bool = False
+    """Removing this operator from the root of a tree changes nothing that a
+    rank-based screen measures.
+
+    Requires two properties, not one. The operator must preserve the
+    cross-sectional order within every day, and it must preserve the NaN
+    pattern exactly. Rank IC, decile membership and turnover are all
+    invariant under a strictly monotone per-day transform, but every one of
+    them depends on which cells are defined.
+
+    ``rank`` qualifies. ``zscore`` preserves order but turns a day with no
+    dispersion into an all-NaN day, and ``log`` preserves order but drops
+    every non-positive cell, so neither is exactly elidable even though both
+    are monotone where they are defined.
+    """
+
     domain: Domain = Domain.ANY
     weight: float = 1.0
     """Relative sampling weight for random tree generation. Tuning knob only;
@@ -441,6 +503,7 @@ _UNARY_OPS: Final[tuple[OpSpec, ...]] = (
         in_types=(DType.MATRIX,),
         out_type=DType.MATRIX,
         axis=Axis.CROSS_SECTION,
+        elidable_at_root=True,
         weight=1.5,
         doc="Per-day cross-sectional rank across instruments, centred on "
         "zero: (position + 0.5) / n - 0.5, range (-0.5, 0.5). n is the day's "
@@ -768,7 +831,9 @@ _GROUP_OPS: Final[tuple[OpSpec, ...]] = (
         weight=1.2,
         doc="Subtract the per-day, per-group mean of x, leaving the part of "
         "the signal that is not the group bet. A null group label that day "
-        "gives NaN: no residual bucket.",
+        "gives NaN: no residual bucket. A group holding fewer than "
+        "MIN_GROUP_SIZE instruments that day also gives NaN, because "
+        "demeaning two names returns half their difference and nothing else.",
     ),
     OpSpec(
         name="rank_within",
@@ -781,8 +846,9 @@ _GROUP_OPS: Final[tuple[OpSpec, ...]] = (
         "same formula as rank, with n the group's non-NaN count. Sums to zero "
         "within each group, so the result is neutral to the group as well as "
         "to the market. A null group label that day gives NaN: no residual "
-        "bucket. A group holding one instrument that day is also NaN, since a "
-        "rank with no population to rank against carries no information.",
+        "bucket, and so does a group holding fewer than MIN_GROUP_SIZE "
+        "instruments, because a centred rank over two names is always plus or "
+        "minus 0.25 whatever the values are.",
     ),
 )
 
@@ -994,6 +1060,17 @@ def _validate_registry() -> None:
             raise AssertionError(
                 f"{op.name}: GROUP values come from the panel, they are never computed"
             )
+
+        if op.elidable_at_root:
+            if op.arity != 1 or op.out_type is not DType.MATRIX:
+                raise AssertionError(
+                    f"{op.name}: only a unary matrix operator can be elided"
+                )
+            if op.axis is not Axis.CROSS_SECTION:
+                raise AssertionError(
+                    f"{op.name}: only a cross-sectional operator preserves the "
+                    f"order a rank-based screen measures"
+                )
 
         if op.commutative:
             if op.arity != 2:
