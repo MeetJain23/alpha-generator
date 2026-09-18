@@ -15,7 +15,7 @@ for the fact that a large number were tried.
 | 0     | `alpha.registry` | append-only trial ledger (SQLite)            | done                    |
 | 1     | `alpha.data`     | panel adapters, cost model, trading calendar | done                    |
 | 2     | `alpha.expr`     | grammar, AST, evaluator, numba kernels       | done                    |
-| 3     | `alpha.screen`   | metrics, the cheap screen, decile portfolios | done                    |
+| 3     | `alpha.screen`   | metrics, screen, portfolios, null calibration | done                   |
 
 Each layer depends only on the ones below it. There is no global state
 anywhere, and every source of randomness is an explicitly passed
@@ -275,6 +275,19 @@ factors and point-in-time alignment are all satisfied by construction in a
 generated panel. Pass criterion is monthly correlation above 0.9 with Ken
 French's UMD.
 
+`scripts/calibrate_null.py` runs random trees against a null and reports the
+|IC| threshold, an empirical `sigma_SR` for the Deflated Sharpe, and a leak
+check. It comes before the gauntlet, not after: every gauntlet threshold is a
+claim about how unusual a number is, and unusual is undefined until the
+distribution under no effect is known.
+
+The null permutes instrument labels of the forward returns within blocks of
+days. That destroys the signal-to-return pairing in both directions while
+leaving a day's return cross-section relabelled rather than altered, so the
+cross-instrument correlation that sets the width of the null survives. Two
+earlier designs failed and are kept as regression tests, including the one
+that scored a price against the returns it is the cumulative product of.
+
 `scripts/check_lookahead.py` asserts prefix equality across 500 random trees:
 evaluating on `panel[:k]` must equal evaluating on the full panel and slicing
 to `[:k]`. `Panel.head(k)` exists so that both sides of that comparison are
@@ -327,8 +340,11 @@ alpha/
     metrics.py          forward returns, rank IC, turnover, coverage
     portfolio.py        decile sorts on a monthly rebalance
     screen.py           the cheap screen
+    null.py             what the statistics look like with nothing there
+  config.py             credentials, from the environment only
   logging_config.py     structured JSON logging
 scripts/
+  calibrate_null.py          tau and sigma_SR, before the gauntlet
   check_decile_machinery.py  planted momentum, harness only
   verify_momentum.py         open milestone, needs real data
   check_lookahead.py         prefix equality across 500 random trees
