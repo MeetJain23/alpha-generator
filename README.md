@@ -16,6 +16,7 @@ for the fact that a large number were tried.
 | 1     | `alpha.data`     | panel adapters, cost model, trading calendar | done                    |
 | 2     | `alpha.expr`     | grammar, AST, evaluator, numba kernels       | done                    |
 | 3     | `alpha.screen`   | metrics, screen, portfolios, null calibration | done                   |
+| 4     | `alpha.gauntlet` | purged folds, eight tests, no frozen thresholds | done                 |
 
 Each layer depends only on the ones below it. There is no global state
 anywhere, and every source of randomness is an explicitly passed
@@ -288,6 +289,16 @@ cross-instrument correlation that sets the width of the null survives. Two
 earlier designs failed and are kept as regression tests, including the one
 that scored a price against the returns it is the cumulative product of.
 
+`scripts/calibrate_gauntlet.py` measures both sides and refuses to pass until
+both are inside budget. Size is easy: plant nothing, count what gets through.
+Power is the half that gets skipped, and skipping it is why systems find
+nothing — eight tests each rejecting a real candidate 20% of the time pass one
+`0.8 ** 8`, which is 17%, and an empty pool looks identical to a search with
+nothing to find.
+
+Measured on synthetic data: joint false acceptance 0.50%, joint false
+rejection 25% at IC 0.0165, inside the 30% budget.
+
 `scripts/check_lookahead.py` asserts prefix equality across 500 random trees:
 evaluating on `panel[:k]` must equal evaluating on the full panel and slicing
 to `[:k]`. `Panel.head(k)` exists so that both sides of that comparison are
@@ -336,6 +347,9 @@ alpha/
     ast.py              immutable trees
     evaluator.py        bottom-up evaluation
     kernels.py          numba incremental kernels
+  gauntlet/
+    folds.py            purged time splits
+    gauntlet.py         the eight tests
   screen/
     metrics.py          forward returns, rank IC, turnover, coverage
     portfolio.py        decile sorts on a monthly rebalance
@@ -345,6 +359,7 @@ alpha/
   logging_config.py     structured JSON logging
 scripts/
   calibrate_null.py          tau and sigma_SR, before the gauntlet
+  calibrate_gauntlet.py      size and power, before any verdict
   check_decile_machinery.py  planted momentum, harness only
   verify_momentum.py         open milestone, needs real data
   check_lookahead.py         prefix equality across 500 random trees
