@@ -318,15 +318,39 @@ def test_a_signal_and_its_negation_are_one_hypothesis(
     panel: Panel, registry: Registry
 ) -> None:
     """The verdict is |IC| > tau, so the screen cannot tell them apart and has
-    no business preferring one. Counting both would double N for nothing."""
+    no business preferring one. Counting both would double N for nothing.
+
+    Uses subtraction rather than division, because IEEE subtraction is exactly
+    antisymmetric and the collapse is exact.
+    """
     screen = make_screen(panel, registry)
-    forward = screen.screen(from_string("div(ts_delay(close, 20), ts_delay(close, 250))"))
-    reverse = screen.screen(from_string("div(ts_delay(close, 250), ts_delay(close, 20))"))
+    forward = screen.screen(from_string("sub(ts_delay(close, 20), ts_delay(close, 250))"))
+    reverse = screen.screen(from_string("sub(ts_delay(close, 250), ts_delay(close, 20))"))
 
     assert forward.value_hash == reverse.value_hash
     assert forward.logged and not reverse.logged
     assert registry.trial_count(screen.run_id) == 1
     assert screen.report.semantic_collapses == 1
+
+
+def test_an_algebraic_negation_may_not_collapse(panel: Panel, registry: Registry) -> None:
+    """A reciprocal is a negation in exact arithmetic and not quite one in
+    float32: division is not exactly order reversing, and on one measured
+    panel two cells in eighty thousand ranked differently between the two
+    spellings, which is enough to change a hash.
+
+    Asserted as a known residue rather than fixed with a tolerance. It errs
+    toward under-collapse, costing one extra row and a slightly inflated N.
+    A tolerance would risk over-collapse, which drops a draw from the null and
+    cannot be seen in any output.
+    """
+    screen = make_screen(panel, registry)
+    forward = screen.screen(from_string("div(ts_delay(close, 20), ts_delay(close, 250))"))
+    reverse = screen.screen(from_string("div(ts_delay(close, 250), ts_delay(close, 20))"))
+
+    assert forward.metrics is not None and reverse.metrics is not None
+    assert forward.metrics.ic == pytest.approx(-reverse.metrics.ic, rel=1e-2)
+    assert registry.trial_count(screen.run_id) in (1, 2)
 
 
 def test_the_two_directions_score_opposite_signs(

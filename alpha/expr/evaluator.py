@@ -191,6 +191,20 @@ def value_hash(ranked: np.ndarray) -> str:
     changes the ranks, the deciles and the IC. It is a different hypothesis
     and gets its own row.
 
+    The collapse is exact for an exact negation and best effort for an
+    algebraic one. ``sub(a, b)`` and ``sub(b, a)`` always collide, because
+    IEEE subtraction is exactly antisymmetric. ``div(a, b)`` and ``div(b, a)``
+    usually collide and sometimes do not: division is not exactly order
+    reversing in float32, and on one measured panel two cells out of eighty
+    thousand ranked differently between the two spellings, which is enough to
+    change a hash.
+
+    That residue is left alone rather than papered over with a tolerance. It
+    errs toward under-collapse, so the cost is one extra row for one idea and
+    a slightly inflated N. Introducing a tolerance to catch it would open the
+    door to over-collapse, which silently drops a draw from the null and is
+    the failure that cannot be seen in any output.
+
     The caller passes ranks that it already needed. The screen ranks each
     candidate once for the IC and reuses that array here, so the hash is free
     rather than a second pass over the panel.
