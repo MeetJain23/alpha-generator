@@ -230,6 +230,80 @@ between invalidating a subset and invalidating everything.
 dangles, a matching source hash still proves the code was byte-identical, and
 it survives anything done to the repository or its graph.
 
+## Calibration constants describe a dataset
+
+`tau`, `sigma_SR` and the maximum curve are measurements taken on one panel.
+They are not properties of markets, and they are not properties of this code.
+
+**Invariant:** a calibration may only be applied to the panel it was measured
+on. `NullCalibration` carries the `data_snapshot_id`, the grammar
+fingerprint, the scoring horizon, the permutation block length and the name of
+the candidate source, and `assert_applies_to` refuses a mismatch on any of
+the first three. The screen calls it in its constructor, and refuses a config
+whose `min_abs_ic` is not the measured `tau`.
+
+**What breaks otherwise:** nothing visible. A `tau` measured on a synthetic
+panel and applied to real data still produces a pass rate. The screen runs,
+candidates survive, the ledger fills, and every number in it is thresholded
+against a distribution that was never measured.
+
+This is the same class of guard as `source_hash`, for the same reason: the
+failure is silent and flattering, so it is made impossible rather than
+written down.
+
+The gap is not small. A generated panel has Gaussian returns, constant
+volatility and independent instruments. Real equity returns have fat tails,
+volatility clustering, cross-sectional dispersion that differs by a factor of
+several between calm and crisis decades, and sector block correlation that
+makes a three thousand name universe behave like a far smaller one. Every one
+of those changes the width of the null, and therefore `tau`.
+
+Any constant currently in this repository that came from a calibration came
+from a synthetic panel and is a placeholder.
+
+### The candidate source is part of the calibration
+
+The maximum of N statistics depends on how correlated the N are. Grammar
+candidates already share subtrees, reuse eight fields and draw windows from
+one short ladder; an evolutionary search that breeds from survivors is more
+correlated still. Calibrating on uniform random trees and then running a
+genetic search measures the maximum of the wrong distribution, and in the
+direction that overstates the bar.
+
+`calibrate` therefore takes the candidate source as an argument and records
+its name. It defaults to uniform random trees, which is correct only for a
+search that is also uniform random trees.
+
+## E[max SR] is measured, not assumed
+
+**The empirical maximum curve is authoritative. `sigma * sqrt(2 ln N)` is a
+sanity check and decides nothing.**
+
+The False Strategy Theorem exists because the experiment was not runnable. It
+assumes the trials are independent, that their Sharpe ratios are Gaussian, and
+that an effective N can be estimated. None of the three holds for a grammar
+search, and all three were substitutes for a measurement.
+
+The measurement is now cheap. `calibrate` partitions its trials into disjoint
+batches of size *k* at a ladder of *k*, takes the maximum within each batch,
+and reports the distribution of those maxima. That is `E[max]` at search size
+*k*, read off the data, with no independence assumption, no effective-N
+estimate and no distributional assumption about the statistic.
+
+It is reported as a curve rather than a number, because the bar depends on how
+many candidates were tried and a single figure hides the search size it
+assumed. Reading the curve outside the measured ladder raises rather than
+extrapolates.
+
+Measured on a synthetic panel, the empirical `E[max SR]` came out 13 to 15 per
+cent *below* `sigma_SR * sqrt(2 ln N)` at every size on the ladder. That is
+the expected direction and the expected reason: correlated candidates have a
+smaller effective number of independent trials, so their maximum is smaller.
+Deflating by the analytic value would have set the bar around 15 per cent too
+high on that panel. The figure is a property of that panel and that source,
+and it has to be remeasured on real data, but the sign of the error is
+structural.
+
 ## The asset line
 
 The repository splits in two, and the split is not about sensitivity in the

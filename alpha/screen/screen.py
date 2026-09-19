@@ -54,6 +54,7 @@ from alpha.expr.evaluator import EvaluationError, evaluate, value_hash
 from alpha.logging_config import get_logger
 from alpha.registry.db import KillReason, Registry, Stage, Trial, Verdict
 from alpha.screen.metrics import SignalMetrics, rank_forward, summarise
+from alpha.screen.null import NullCalibration
 
 _log = get_logger(__name__)
 
@@ -84,6 +85,22 @@ class ScreenConfig:
 
     horizon: int = 1
     """Days ahead the signal is scored against."""
+
+    @classmethod
+    def from_calibration(
+        cls, calibration: NullCalibration, **overrides: float | int
+    ) -> ScreenConfig:
+        """Build a config whose tau was measured rather than chosen.
+
+        The horizon comes from the calibration too, because scoring at a
+        different horizon than the null was measured at makes tau describe a
+        different quantity.
+        """
+        return cls(
+            min_abs_ic=calibration.tau,
+            horizon=calibration.horizon,
+            **overrides,  # type: ignore[arg-type]
+        )
 
     def as_config(self) -> dict[str, float | int]:
         """For ``runs.config_json``."""
@@ -151,12 +168,35 @@ class Screen:
         registry: Registry,
         run_id: str,
         config: ScreenConfig | None = None,
+        calibration: NullCalibration | None = None,
+        panel_snapshot: str | None = None,
     ) -> None:
         self.panel = panel
         self.registry = registry
         self.run_id = run_id
         self.config = config or ScreenConfig()
+        self.calibration = calibration
         self.report = ScreenReport()
+
+        if calibration is not None:
+            # Refused, not warned about. A tau measured on one dataset and
+            # applied to another thresholds against a distribution that was
+            # never measured, and nothing downstream would look wrong: the
+            # screen would run, report a pass rate, and every number in it
+            # would be meaningless. Same class of guard as source_hash.
+            calibration.assert_applies_to(
+                panel,
+                horizon=self.config.horizon,
+                panel_snapshot=panel_snapshot,
+            )
+            if self.config.min_abs_ic != calibration.tau:
+                raise ValueError(
+                    f"the screen's min_abs_ic is {self.config.min_abs_ic} but "
+                    f"the calibration measured tau as {calibration.tau}. Build "
+                    f"the config with ScreenConfig.from_calibration so the "
+                    f"threshold is the measured one."
+                )
+
         self._ranked_forward = rank_forward(panel, self.config.horizon)
         self._expr_seen: set[str] = set()
         self._value_seen: dict[str, str] = {}
