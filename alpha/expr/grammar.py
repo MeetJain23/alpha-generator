@@ -914,11 +914,22 @@ def param_grid(op: OpSpec) -> tuple[tuple[int, ...], ...]:
     return tuple(product(*(p.values for p in op.params)))
 
 
-def validate_params(op: OpSpec, params: tuple[int, ...]) -> None:
+def validate_params(
+    op: OpSpec, params: tuple[int, ...], *, allow_off_ladder: bool = False
+) -> None:
     """Raise ``ValueError`` unless ``params`` is legal for ``op``.
 
     Called on ``Node`` construction, so an ill-formed tree cannot exist. The
     ledger never records a trial that was never a valid hypothesis.
+
+    ``allow_off_ladder`` relaxes only the ladder membership check, and only
+    for a probe. The gauntlet's jitter test has to evaluate a window at plus
+    or minus twenty per cent of its setting, and the ladder is far too coarse
+    for that: the neighbours of 20 are 10 and 60, which are minus fifty and
+    plus two hundred per cent. A probe is a sensitivity instrument rather
+    than a candidate, it is never hashed into the ledger and never counted as
+    a trial, and the window must still be a positive integer inside the
+    ladder's overall span.
     """
     if len(params) != len(op.params):
         raise ValueError(
@@ -929,11 +940,20 @@ def validate_params(op: OpSpec, params: tuple[int, ...]) -> None:
             raise ValueError(
                 f"{op.name}.{spec.name} must be an int, got {type(value).__name__}"
             )
-        if value not in spec:
-            raise ValueError(
-                f"{op.name}.{spec.name}={value} is outside the admissible "
-                f"ladder {spec.values}"
-            )
+        if value in spec:
+            continue
+        if allow_off_ladder:
+            if not spec.values[0] <= value <= spec.values[-1]:
+                raise ValueError(
+                    f"{op.name}.{spec.name}={value} is outside the ladder's "
+                    f"span {spec.values[0]}..{spec.values[-1]}, which even a "
+                    f"probe may not leave"
+                )
+            continue
+        raise ValueError(
+            f"{op.name}.{spec.name}={value} is outside the admissible "
+            f"ladder {spec.values}"
+        )
 
 
 def validate_child_types(op: OpSpec, child_types: tuple[DType, ...]) -> None:
@@ -944,7 +964,13 @@ def validate_child_types(op: OpSpec, child_types: tuple[DType, ...]) -> None:
         raise ValueError(f"{op.name} expects {expected}, got {got}")
 
 
-def warmup(op: OpSpec, params: tuple[int, ...], child_warmups: tuple[int, ...]) -> int:
+def warmup(
+    op: OpSpec,
+    params: tuple[int, ...],
+    child_warmups: tuple[int, ...],
+    *,
+    allow_off_ladder: bool = False,
+) -> int:
     """Rows of the result that are not valid data.
 
     The result row at index ``warmup`` is the first one computed entirely from
@@ -959,7 +985,7 @@ def warmup(op: OpSpec, params: tuple[int, ...], child_warmups: tuple[int, ...]) 
     base = max(child_warmups) if child_warmups else 0
     if op.warmup_rule is WarmupRule.NONE:
         return base
-    validate_params(op, params)
+    validate_params(op, params, allow_off_ladder=allow_off_ladder)
     d = params[0]
     if op.warmup_rule is WarmupRule.WINDOW_MINUS_1:
         return base + d - 1
@@ -968,7 +994,7 @@ def warmup(op: OpSpec, params: tuple[int, ...], child_warmups: tuple[int, ...]) 
     raise AssertionError(f"unhandled warmup rule {op.warmup_rule!r}")
 
 
-def min_periods(op: OpSpec, d: int) -> int | None:
+def min_periods(op: OpSpec, d: int, *, allow_off_ladder: bool = False) -> int | None:
     """Non-NaN observations a window must hold for its result to exist.
 
     ``ceil(MIN_PERIODS_FRACTION * d)`` for aggregating operators. ``None`` for
@@ -981,7 +1007,7 @@ def min_periods(op: OpSpec, d: int) -> int | None:
     """
     if op.window_policy in (WindowPolicy.NONE, WindowPolicy.POINT):
         return None
-    validate_params(op, (d,))
+    validate_params(op, (d,), allow_off_ladder=allow_off_ladder)
     return ceil(MIN_PERIODS_FRACTION * d)
 
 

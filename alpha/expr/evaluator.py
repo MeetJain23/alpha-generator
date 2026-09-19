@@ -413,7 +413,7 @@ def _apply(node: Node, children: list[np.ndarray]) -> tuple[np.ndarray, float, i
 def _windowed(node: Node, children: list[np.ndarray]) -> tuple[np.ndarray, float, int]:
     """Run a kernel and turn its counters into one degradation fraction."""
     d = node.params[0]
-    floor = grammar.min_periods(node.spec, d)
+    floor = grammar.min_periods(node.spec, d, allow_off_ladder=node.probe)
     assert floor is not None  # guaranteed by the window policy
     # The node's warmup, not the row where this window first closes. See the
     # kernels module: min_periods alone would let a node emit into rows its

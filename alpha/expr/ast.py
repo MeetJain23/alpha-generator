@@ -58,6 +58,18 @@ class Node:
     children: tuple[Node, ...] = ()
     params: tuple[int, ...] = ()
 
+    probe: bool = field(default=False, compare=False, repr=False)
+    """A sensitivity instrument rather than a candidate.
+
+    A probe may carry a window off the admissible ladder, which the gauntlet's
+    jitter test needs because the ladder is far too coarse to express plus or
+    minus twenty per cent: the neighbours of 20 are 10 and 60.
+
+    Excluded from equality and from the hash, because it says how the node is
+    being used rather than what it computes. A probe is never a hypothesis.
+    Nothing logs one as a trial and nothing counts one in N.
+    """
+
     _hash: str = field(init=False, compare=False, repr=False)
     _warmup: int = field(init=False, compare=False, repr=False)
     _depth: int = field(init=False, compare=False, repr=False)
@@ -66,7 +78,7 @@ class Node:
     def __post_init__(self) -> None:
         spec = grammar.get(self.op)
         grammar.validate_child_types(spec, tuple(c.dtype for c in self.children))
-        grammar.validate_params(spec, self.params)
+        grammar.validate_params(spec, self.params, allow_off_ladder=self.probe)
 
         children = self.children
         if spec.commutative:
@@ -79,7 +91,12 @@ class Node:
         object.__setattr__(
             self,
             "_warmup",
-            grammar.warmup(spec, self.params, tuple(c._warmup for c in children)),
+            grammar.warmup(
+                spec,
+                self.params,
+                tuple(c._warmup for c in children),
+                allow_off_ladder=self.probe,
+            ),
         )
         object.__setattr__(
             self, "_depth", 1 + max((c._depth for c in children), default=0)
@@ -187,7 +204,7 @@ def _replace_at(node: Node, index: int, replacement: Node) -> Node:
         offset += child._size
     if index == 0:
         return replacement
-    return Node(node.op, tuple(rebuilt), node.params)
+    return Node(node.op, tuple(rebuilt), node.params, node.probe)
 
 
 def _compute_hash(op: str, params: tuple[int, ...], children: tuple[Node, ...]) -> str:
