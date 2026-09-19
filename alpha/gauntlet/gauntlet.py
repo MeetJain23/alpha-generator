@@ -173,8 +173,20 @@ class GauntletThresholds:
         """Take tau from the null, and the rest from a gauntlet calibration."""
         return cls(min_abs_ic=calibration.tau, **measured)  # type: ignore[arg-type]
 
-    def as_config(self) -> dict[str, float | int | None]:
-        return {f"gauntlet_{name}": getattr(self, name) for name in (
+    def fingerprint(self) -> str:
+        """Hash of the values, for runs.config_json beside source_hash.
+
+        Defined here rather than only in ``frozen`` so an ad hoc threshold set
+        can be logged too, and so a run always names the gauntlet that judged
+        it.
+        """
+        from alpha.gauntlet.frozen import fingerprint as _fingerprint
+
+        return _fingerprint(self)
+
+    def as_config(self) -> dict[str, float | int | None | str]:
+        config: dict[str, float | int | None | str] = {
+            f"gauntlet_{name}": getattr(self, name) for name in (
             "min_abs_ic",
             "min_fold_sign_agreement",
             "min_fold_ic_fraction",
@@ -184,6 +196,8 @@ class GauntletThresholds:
             "min_regime_sign_agreement",
             "min_breadth",
         )}
+        config["gauntlet_fingerprint"] = self.fingerprint()
+        return config
 
 
 @dataclass(frozen=True, slots=True)

@@ -315,3 +315,170 @@ def test_the_thresholds_reach_the_run_config() -> None:
     config = GauntletThresholds(min_abs_ic=0.01).as_config()
     assert config["gauntlet_min_abs_ic"] == 0.01
     assert config["gauntlet_min_breadth"] is None
+
+
+# --------------------------------------------------------------------------
+# the budget arithmetic
+# --------------------------------------------------------------------------
+
+
+def test_wilson_covers_a_zero_count() -> None:
+    """Zero successes is where the normal approximation gives a degenerate
+    interval, and zero successes is what a tail measurement usually returns."""
+    from alpha.gauntlet.budget import wilson
+
+    rate = wilson(0, 3)
+    assert rate.estimate == 0.0
+    assert rate.low == 0.0
+    assert rate.high > 0.4, "three samples cannot rule much out"
+
+
+def test_wilson_narrows_as_evidence_accumulates() -> None:
+    from alpha.gauntlet.budget import wilson
+
+    few, many = wilson(1, 200), wilson(50, 10_000)
+    assert few.high - few.low > many.high - many.low
+
+
+def test_wilson_never_leaves_the_unit_interval() -> None:
+    from alpha.gauntlet.budget import wilson
+
+    for successes, trials in ((0, 1), (1, 1), (0, 10_000), (10_000, 10_000)):
+        rate = wilson(successes, trials)
+        assert 0.0 <= rate.low <= rate.high <= 1.0
+
+
+def test_the_width_factor_reports_an_unmeasured_rate_as_infinite() -> None:
+    from alpha.gauntlet.budget import wilson
+
+    assert wilson(0, 5).width_factor == float("inf")
+
+
+def test_survival_is_the_product_of_the_two_stages() -> None:
+    from alpha.gauntlet.budget import SurvivalBudget, wilson
+
+    budget = SurvivalBudget(wilson(10, 1000), wilson(30, 100))
+    point, low, high = budget.survival
+    assert point == pytest.approx(0.01 * 0.30)
+    assert low < point < high
+
+
+def test_expected_survivors_scale_with_the_search() -> None:
+    from alpha.gauntlet.budget import SurvivalBudget, wilson
+
+    budget = SurvivalBudget(wilson(10, 1000), wilson(30, 100))
+    small, _, _ = budget.expected_survivors(1_000)
+    large, _, _ = budget.expected_survivors(1_000_000)
+    assert large == pytest.approx(small * 1000)
+
+
+def test_the_budget_reports_its_worst_case_first() -> None:
+    """The worst case is the one that constrains a decision: a high survival
+    rate means a small budget."""
+    from alpha.gauntlet.budget import SurvivalBudget, wilson
+
+    worst, middle, best = SurvivalBudget(
+        wilson(10, 1000), wilson(30, 100)
+    ).budget_at(1.0)
+    assert worst < middle < best
+
+
+def test_redundant_pairs_are_found() -> None:
+    from alpha.gauntlet.budget import redundant_pairs, rejection_correlation
+
+    shared = np.array([1.0, 0.0, 1.0, 0.0, 1.0, 0.0])
+    rejects = {
+        "a": shared,
+        "b": shared.copy(),
+        "c": np.array([1.0, 1.0, 0.0, 0.0, 1.0, 1.0]),
+    }
+    names, matrix = rejection_correlation(rejects)
+    pairs = redundant_pairs(names, matrix, threshold=0.9)
+    assert [(left, right) for left, right, _ in pairs] == [("a", "b")]
+
+
+def test_a_test_that_never_rejects_has_no_correlation() -> None:
+    """No relationship and no information are different statements."""
+    from alpha.gauntlet.budget import rejection_correlation
+
+    rejects = {
+        "varies": np.array([1.0, 0.0, 1.0, 0.0]),
+        "never": np.zeros(4),
+    }
+    names, matrix = rejection_correlation(rejects)
+    assert np.isnan(matrix[0, 1])
+    assert matrix[1, 1] == 1.0
+
+
+# --------------------------------------------------------------------------
+# the thresholds are frozen and versioned
+# --------------------------------------------------------------------------
+
+
+def test_the_frozen_thresholds_are_complete() -> None:
+    from alpha.gauntlet.frozen import current_thresholds
+
+    assert current_thresholds().unset() == ()
+    current_thresholds().require_complete()
+
+
+def test_the_history_is_contiguous_and_current_is_last() -> None:
+    from alpha.gauntlet.frozen import CURRENT, HISTORY
+
+    assert [d.version for d in HISTORY] == list(range(1, len(HISTORY) + 1))
+    assert CURRENT is HISTORY[-1]
+
+
+def test_every_decision_states_why_it_exists() -> None:
+    """A threshold change without a reason is indistinguishable afterwards
+    from loosening the gauntlet because nothing survived."""
+    from alpha.gauntlet.frozen import HISTORY
+
+    for decision in HISTORY:
+        assert len(decision.reason) > 40, decision.version
+        assert decision.dated
+        assert decision.data_snapshot_id
+        assert decision.measured
+
+
+def test_every_decision_records_what_is_wrong_with_it() -> None:
+    """Written down rather than discovered later by someone wondering why a
+    class of candidate never survives."""
+    from alpha.gauntlet.frozen import HISTORY
+
+    for decision in HISTORY:
+        assert len(decision.limitations) > 40, decision.version
+
+
+def test_the_fingerprint_matches_the_values() -> None:
+    from alpha.gauntlet.frozen import CURRENT, fingerprint
+
+    assert CURRENT.fingerprint() == fingerprint(CURRENT.thresholds)
+
+
+def test_editing_a_threshold_changes_the_fingerprint() -> None:
+    """An edit that forgets to bump the version still shows up as a different
+    gauntlet in the ledger."""
+    from dataclasses import replace
+
+    from alpha.gauntlet.frozen import current_thresholds
+
+    before = current_thresholds()
+    after = replace(before, min_abs_ic=(before.min_abs_ic or 0.0) + 0.01)
+    assert before.fingerprint() != after.fingerprint()
+
+
+def test_the_fingerprint_reaches_the_run_config() -> None:
+    from alpha.gauntlet.frozen import current_thresholds
+
+    config = current_thresholds().as_config()
+    assert config["gauntlet_fingerprint"] == current_thresholds().fingerprint()
+
+
+def test_the_frozen_thresholds_judge_a_planted_signal(panel: Panel) -> None:
+    from alpha.gauntlet.frozen import current_thresholds
+
+    judged = Gauntlet(panel, thresholds=current_thresholds(), n_folds=5)
+    result = judged.run(from_string(MOMENTUM))
+    assert result.judged
+    assert isinstance(result.passed, bool)

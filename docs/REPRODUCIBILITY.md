@@ -304,6 +304,115 @@ high on that panel. The figure is a property of that panel and that source,
 and it has to be remeasured on real data, but the sign of the error is
 structural.
 
+## The search budget is set by the false-acceptance rate
+
+Not by compute. This is the arithmetic that decides what the generator has to
+be, and it is short enough that nobody does it.
+
+    P(survive | null) = P(pass screen | null)
+                      x P(pass gauntlet | passed screen, null)
+
+Expected null survivors at search size N is `N x P(survive | null)`. If the
+pool is meant to hold a handful of real alphas, the N at which that count
+crosses one is the budget, and no amount of evaluator throughput moves it.
+
+**Measured on the synthetic panel: one expected null survivor at N around
+1,100, with a 95 per cent interval of 300 to 5,000.** The supportable search
+is a few hundred to a few thousand candidates. Not a million.
+
+### The conditional is the number that matters, and it rises
+
+`P(pass gauntlet)` has to be measured on candidates that already passed the
+screen. Those are a different population, and the difference runs the wrong
+way:
+
+| magnitude cut | candidates | pass all robustness tests |
+| ------------- | ---------- | ------------------------- |
+| median        | 1050       | 2.7% |
+| 90th pct      | 210        | 13.3% |
+| 99th pct      | 21         | 61.9% |
+
+Every robustness statistic is a ratio with the candidate's own IC in the
+denominator. A null candidate that cleared a high bar by luck has a large
+denominator, so its folds look consistent, its neighbourhood looks flat and
+its decay looks smooth. **The gauntlet is weakest exactly where it is needed.**
+
+The rate at tau itself cannot be measured by brute force: one null candidate
+in a thousand clears tau, so pinning that rate to within a factor of two needs
+roughly twenty events above tau and therefore around fourteen thousand full
+gauntlet runs on this panel. The calibration therefore takes the highest cut
+with a usable sample as a **lower bound** on the conditional, which makes every
+budget it reports an **upper bound** on N. Reading the empty sample at tau as
+zero would report no risk at all.
+
+### Every rate carries an interval
+
+A rate of 0.5 per cent measured on two hundred candidates has a 95 per cent
+Wilson interval of roughly 0.06 to 2.7 per cent: a factor of forty in the rate
+and a factor of forty in the budget. Wilson rather than the normal
+approximation, because the counts are small and the rates near zero, which is
+where the normal interval extends below zero.
+
+## The generator samples uniformly, and does not evolve
+
+A genetic program is the obvious thing to reach for and it is the wrong tool
+here, for three reasons that compound.
+
+**It has no cheap null.** Selection means later generations are drawn from a
+region already chosen for high IC *on this data*. The null distribution of a
+GP's maximum is therefore only measurable by running the identical
+evolutionary loop, same population, same generations, same selection pressure,
+against permuted labels. Anything else measures a different search. That null
+costs as much as the search itself, every time a parameter changes.
+
+**Its trial count is not its trial count.** A hundred generations of a
+thousand individuals is not `1e5` independent trials. It is a search climbing
+the noise gradient, and the maximum it reaches under the null sits far above
+what uniform sampling reaches at the same nominal count.
+
+**There is no space left to need it.** A GP exists to search spaces too large
+to sample. The budget above is a few hundred to a few thousand candidates.
+Uniform random sampling covers that comfortably, and its null is one line to
+measure.
+
+So `--source` stays an explicit argument with `random_tree` as the only
+implementation, and it refuses an unknown name rather than silently defaulting.
+Revisiting this needs two things: a false-acceptance rate tight enough to
+justify a much larger N, and the budget to run the evolutionary loop's own
+null through the same loop.
+
+## Unsatisfied milestones
+
+Two, and both need the real panel. Neither can be closed with generated data,
+and nothing downstream should be read as validated until they are.
+
+### `verify_momentum.py`
+
+12-1 momentum against Ken French's UMD, monthly correlation above 0.9. It
+exists to validate the data pipeline: delisting composition, adjustment
+factors and point-in-time alignment are all satisfied by construction in a
+generated panel, so synthetic data cannot exercise any of them.
+
+### Real-data power
+
+Run 12-1 momentum, short-term reversal and low-volatility through the full
+gauntlet on the real panel.
+
+These three are the only ground-truth positives that exist. They have been
+replicated across decades, across markets and by people with no stake in this
+code. If the gauntlet rejects one of them, the gauntlet is wrong, and that is
+a conclusion no synthetic plant can deliver: a plant is a thing this
+repository invented, and it can only confirm that the tests detect what the
+generator was told to put there.
+
+The synthetic calibration already points at where this is likely to fail. A
+plant present only in high-volatility regimes reaches an IC of 0.033, well
+above tau, and is still rejected 55 per cent of the time by the
+regime-agreement test, which is set to require both regimes. Regime-dependent
+effects are ordinary. Low-volatility, in particular, is an effect whose
+behaviour differs sharply between calm and turbulent periods, so it is a live
+candidate to be rejected for being what it is.
+
 ## The asset line
 
 The repository splits in two, and the split is not about sensitivity in the

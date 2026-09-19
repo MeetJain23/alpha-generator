@@ -81,6 +81,42 @@ class SyntheticSpec:
     trailing return. Zero by default: synthetic data should not accidentally
     validate a hypothesis."""
 
+    momentum_decay_to: float = 1.0
+    """Strength multiplier at the end of the sample, interpolated linearly.
+
+    A plant that holds its strength for thirty years is not what a real effect
+    looks like, and it is the exact shape a fold-stability test rewards. Set
+    this below one and that test has to distinguish decay from instability,
+    which is the distinction deciding whether the gauntlet would have rejected
+    momentum.
+    """
+
+    momentum_universe_fraction: float = 1.0
+    """Fraction of instruments, least liquid first, that carry the effect.
+
+    A universe-wide plant is the shape a breadth test rewards. Real effects
+    concentrate: momentum is strongest in small illiquid names, and a signal
+    that works in half the universe and does nothing in the other half is an
+    ordinary finding rather than a broken one.
+    """
+
+    momentum_regime_only: bool = False
+    """Plant only on high-volatility days.
+
+    The shape a regime-agreement test rewards is an effect present in both
+    regimes. Real effects frequently are not.
+    """
+
+    vol_regime_strength: float = 0.0
+    """Amplitude of a latent two-state volatility regime.
+
+    Zero by default so existing panels are unchanged. Above zero the daily
+    volatility switches between a calm and a turbulent state in persistent
+    blocks, which is the one property of real returns cheap enough to put in a
+    generator and important enough to matter: it is what makes cross-sectional
+    dispersion vary over time.
+    """
+
     def __post_init__(self) -> None:
         if self.n_days < 2 or self.n_instruments < 2:
             raise ValueError("a panel needs at least two days and two instruments")
@@ -117,17 +153,20 @@ def generate(rng: np.random.Generator, spec: SyntheticSpec | None = None) -> Syn
     )
     shape = (spec.n_days, spec.n_instruments)
 
+    liquidity = rng.lognormal(mean=0.0, sigma=1.0, size=spec.n_instruments)
     listed_from, listed_to, delist_return = _listing_windows(rng, spec)
     listed = _listing_mask(shape, listed_from, listed_to)
     halted = _halts(rng, spec, listed)
     tradable = listed & ~halted
 
-    returns = _returns(rng, spec, tradable)
+    returns = _returns(rng, spec, tradable, liquidity)
     market_returns = returns.copy()
     _apply_delisting_returns(returns, listed_to, delist_return, spec)
 
     close = _prices_from_returns(rng, returns, tradable)
-    planes = _derive_planes(rng, spec, close, returns, tradable, listed, halted)
+    planes = _derive_planes(
+        rng, spec, close, returns, tradable, listed, halted, liquidity
+    )
     sector, changes = _sectors(rng, spec, listed)
     planes["sector"] = sector
 
@@ -218,22 +257,89 @@ def _halts(
 
 
 def _returns(
-    rng: np.random.Generator, spec: SyntheticSpec, tradable: np.ndarray
+    rng: np.random.Generator,
+    spec: SyntheticSpec,
+    tradable: np.ndarray,
+    liquidity: np.ndarray,
 ) -> np.ndarray:
     """Daily returns, NaN wherever the instrument did not trade."""
     daily_vol = spec.annual_vol / np.sqrt(TRADING_DAYS_PER_YEAR)
     daily_drift = spec.annual_drift / TRADING_DAYS_PER_YEAR
-    values = rng.normal(daily_drift, daily_vol, size=tradable.shape)
+
+    regime = _volatility_regime(rng, spec, tradable.shape[0])
+    noise = rng.normal(0.0, 1.0, size=tradable.shape)
+    values = daily_drift + daily_vol * noise * regime[:, None]
 
     if spec.momentum_strength:
-        values = _plant_momentum(values, spec.momentum_strength, daily_vol)
+        scale = _plant_scale(spec, tradable.shape, liquidity, regime)
+        values = _plant_momentum(values, spec.momentum_strength, daily_vol, scale)
 
     values[~tradable] = np.nan
     return values.astype(np.float64)
 
 
+def _volatility_regime(
+    rng: np.random.Generator, spec: SyntheticSpec, n_days: int
+) -> np.ndarray:
+    """A persistent two-state multiplier on daily volatility.
+
+    Blocks rather than an independent draw per day, because what matters is
+    that turbulent periods are contiguous. That is what makes cross-sectional
+    dispersion vary over time, and it is what a regime test needs something
+    real to detect.
+    """
+    if spec.vol_regime_strength <= 0.0:
+        return np.ones(n_days, dtype=np.float64)
+
+    regime = np.ones(n_days, dtype=np.float64)
+    position = 0
+    calm = True
+    while position < n_days:
+        length = int(rng.integers(40, 160))
+        stop = min(position + length, n_days)
+        regime[position:stop] = (
+            1.0 - spec.vol_regime_strength if calm else 1.0 + spec.vol_regime_strength
+        )
+        calm = not calm
+        position = stop
+    return regime
+
+
+def _plant_scale(
+    spec: SyntheticSpec,
+    shape: tuple[int, int],
+    liquidity: np.ndarray,
+    regime: np.ndarray,
+) -> np.ndarray:
+    """Per-cell multiplier on the planted effect.
+
+    Three ways a real effect fails to look like an idealised one, and each is
+    a shape one of the gauntlet tests would otherwise reward by default.
+    """
+    n_days, n_instruments = shape
+    scale = np.ones((n_days, n_instruments), dtype=np.float64)
+
+    if spec.momentum_decay_to != 1.0:
+        scale = scale * np.linspace(1.0, spec.momentum_decay_to, n_days)[:, None]
+
+    if spec.momentum_universe_fraction < 1.0:
+        keep = max(int(round(spec.momentum_universe_fraction * n_instruments)), 1)
+        least_liquid = np.argsort(liquidity)[:keep]
+        mask = np.zeros(n_instruments, dtype=np.float64)
+        mask[least_liquid] = 1.0
+        scale = scale * mask[None, :]
+
+    if spec.momentum_regime_only:
+        scale = scale * (regime > 1.0).astype(np.float64)[:, None]
+
+    return scale
+
+
 def _plant_momentum(
-    values: np.ndarray, strength: float, daily_vol: float
+    values: np.ndarray,
+    strength: float,
+    daily_vol: float,
+    scale: np.ndarray | None = None,
 ) -> np.ndarray:
     """Add a component of next-period return explained by trailing 12-1 return.
 
@@ -254,9 +360,10 @@ def _plant_momentum(
     for t in range(250, n_days):
         trailing = values[t - 250 : t - 20].sum(axis=0)
         centred = trailing - np.nanmean(trailing)
-        scale = np.nanstd(centred)
-        if scale > 0:
-            planted[t] += strength * daily_vol * centred / scale
+        spread = np.nanstd(centred)
+        if spread > 0:
+            step = strength * daily_vol * centred / spread
+            planted[t] += step if scale is None else step * scale[t]
     return planted
 
 
@@ -326,6 +433,7 @@ def _derive_planes(
     tradable: np.ndarray,
     listed: np.ndarray,
     halted: np.ndarray,
+    liquidity: np.ndarray,
 ) -> dict[str, np.ndarray]:
     """Everything the schema requires that is not price, return or sector."""
     shape = close.shape
@@ -337,7 +445,14 @@ def _derive_planes(
     open_ = low + (high - low) * rng.random(shape)
     vwap = low + (high - low) * rng.random(shape)
 
-    volume = rng.lognormal(mean=12.0, sigma=1.0, size=shape) * nan_where_untraded
+    # Volume carries a persistent per-instrument liquidity level, so the same
+    # names are thin throughout. A plant restricted to the illiquid half is
+    # then restricted to a group the data itself identifies.
+    volume = (
+        rng.lognormal(mean=12.0, sigma=0.5, size=shape)
+        * liquidity[None, :]
+        * nan_where_untraded
+    )
     shares = rng.lognormal(mean=17.0, sigma=0.8, size=spec.n_instruments)
     mcap = close * shares[None, :]
 

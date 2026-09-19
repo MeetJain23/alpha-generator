@@ -289,15 +289,28 @@ cross-instrument correlation that sets the width of the null survives. Two
 earlier designs failed and are kept as regression tests, including the one
 that scored a price against the returns it is the cumulative product of.
 
-`scripts/calibrate_gauntlet.py` measures both sides and refuses to pass until
-both are inside budget. Size is easy: plant nothing, count what gets through.
-Power is the half that gets skipped, and skipping it is why systems find
-nothing — eight tests each rejecting a real candidate 20% of the time pass one
-`0.8 ** 8`, which is 17%, and an empty pool looks identical to a search with
-nothing to find.
+`scripts/calibrate_gauntlet.py` measures both sides, and then computes the
+search budget they imply. Size is easy: plant nothing, count what gets
+through. Power is the half that gets skipped, and skipping it is why systems
+find nothing — eight tests each rejecting a real candidate 20% of the time
+pass one `0.8 ** 8`, which is 17%, and an empty pool looks identical to a
+search with nothing to find.
 
-Measured on synthetic data: joint false acceptance 0.50%, joint false
-rejection 25% at IC 0.0165, inside the 30% budget.
+The budget is the output that matters:
+
+    P(survive | null) = P(pass screen) x P(pass gauntlet | passed screen)
+
+Measured on the synthetic panel, one expected null survivor arrives at **N
+around 1,100 [300, 5,000]**. The supportable search is a few hundred to a few
+thousand candidates, and it is capped by the false-acceptance rate rather than
+by compute. That is why the generator samples uniformly instead of evolving:
+a GP exists to search spaces too large to sample, and there is no such space
+here. See `docs/REPRODUCIBILITY.md`.
+
+Plants are shaped like real effects, not idealised ones — decaying over the
+sample, confined to the illiquid half of the universe, or present only in
+high-volatility regimes — because those three shapes are exactly what fold
+stability, breadth and regime agreement reward by default.
 
 `scripts/check_lookahead.py` asserts prefix equality across 500 random trees:
 evaluating on `panel[:k]` must equal evaluating on the full panel and slicing
